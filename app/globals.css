@@ -1,0 +1,40 @@
+@import "tailwindcss";
+
+@theme {
+  --color-pagani-black: #1a1a1a;
+  --color-pagani-gold: #D4AF37;
+  --color-bright-gold: #FFD700;
+  --color-carbon-gray: #2a2a2a;
+}
+
+/* Global Styles */
+body {
+  background-color: var(--color-pagani-black);
+  color: white;
+  font-family: var(--font-rajdhani), sans-serif;
+  overflow-x: hidden;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  font-family: var(--font-orbitron), sans-serif;
+}
+
+::selection {
+  background-color: var(--color-pagani-gold);
+  color: black;
+}
+
+/* Custom Scrollbar (optional but adds premium feel) */
+::-webkit-scrollbar {
+  width: 8px;
+}
+::-webkit-scrollbar-track {
+  background: var(--color-pagani-black);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-carbon-gray);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-pagani-gold);
+}
