@@ -1,10 +1,11 @@
 "use client";
 
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import { useScroll } from "framer-motion";
 import ZondaScrollCanvas from "@/components/ZondaScrollCanvas";
 import ZondaExperience from "@/components/ZondaExperience";
 import Navbar from "@/components/Navbar";
+import ChatAssistant from "@/components/ChatAssistant";
 
 export default function Home() {
   const containerRef = useRef<HTMLElement>(null);
@@ -12,10 +13,11 @@ export default function Home() {
     target: containerRef,
     offset: ["start start", "end end"],
   });
+  const [isChatOpen, setIsChatOpen] = useState(false);
 
   return (
     <main className="bg-pagani-black min-h-screen text-white selection:bg-pagani-gold selection:text-black">
-      <Navbar />
+      <Navbar onInquireClick={() => setIsChatOpen(true)} />
 
       {/* SCROLL SEQUENCE (Locked for 600vh) */}
       <section ref={containerRef} className="h-[600vh] relative">
@@ -38,6 +40,39 @@ export default function Home() {
         <Features />
         <Footer />
       </div>
+
+      {/* AI Assistant */}
+      <ChatAssistant
+        isOpen={isChatOpen}
+        onClose={() => setIsChatOpen(false)}
+      />
+
+      {/* Floating AI Button */}
+      {!isChatOpen && (
+        <button
+          onClick={() => setIsChatOpen(true)}
+          className="fixed bottom-6 right-6 z-50 w-14 h-14 rounded-full flex items-center justify-center transition-all hover:scale-110"
+          style={{
+            background:
+              "linear-gradient(135deg, rgba(212,175,55,0.2) 0%, rgba(212,175,55,0.05) 100%)",
+            border: "1px solid rgba(212,175,55,0.35)",
+            boxShadow: "0 0 30px rgba(212,175,55,0.1)",
+          }}
+          aria-label="Open AI Assistant"
+        >
+          <svg
+            width="24"
+            height="24"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="#D4AF37"
+            strokeWidth="1.5"
+          >
+            <path d="M12 2a10 10 0 0110 10c0 5.523-4.477 10-10 10a10 10 0 01-8.94-5.526L2 22l2.526-5.06A10 10 0 0112 2z" />
+            <path d="M8 10h8M8 14h5" strokeLinecap="round" />
+          </svg>
+        </button>
+      )}
     </main>
   );
 }
