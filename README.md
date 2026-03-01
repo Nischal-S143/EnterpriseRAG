@@ -1,65 +1,60 @@
-# Pagani Zonda R – Enterprise Intelligence Showcase
+# Pagani Zonda R – Enterprise Intelligence RAG Agent
 
-A cinematic scrollytelling luxury car experience powered by an Enterprise Retrieval-Augmented Generation (RAG) backend using Google Gemini API.
+A cinematic scrollytelling luxury automotive experience integrated with a highly secure, role-based **Enterprise Retrieval-Augmented Generation (RAG) System** powered by Google Gemini 1.5 Pro.
 
 ## 🏎️ Overview
 
-Italian luxury meets enterprise intelligence. This project combines a scroll-controlled image sequence (240 frames) with an AI-powered assistant that answers questions about the Pagani Zonda R using a RAG architecture.
+This project showcases the intersection of ultra-premium frontend design and secure, enterprise-grade AI architecture. 
+
+While the frontend delivers a stunning 240-frame scroll-controlled 3D sequence of the Pagani Zonda R, the true powerhouse of the application is the **Enterprise RAG Agent**. Users authenticate into the system via JWT and are routed to role-specific experiences (Viewer, Engineer, Admin). The AI Assistant securely queries a persistent FAISS vector store, dynamically filtering internal technical documents, telemetry, and financial data based strictly on the user's authenticated role.
 
 ## 🏗️ Architecture
 
 ```
 Frontend (Next.js 16 + Tailwind v4)       Backend (FastAPI + Gemini)
 ┌──────────────────────────────┐          ┌──────────────────────────────┐
-│  Scroll Canvas (240 frames)  │          │  /api/register  (POST)      │
-│  HUD Overlay (3 phases)      │   REST   │  /api/login     (POST)      │
-│  ChatAssistant (streaming)   │ ◄──────► │  /api/refresh   (POST)      │
-│  Auth Pages (login/register) │          │  /api/chat      (POST)      │
-│  Glassmorphism Navbar        │          │  /api/chat/stream (POST)    │
+│  Role-Based Next.js Routing  │          │  /api/register  (POST)      │
+│  Viewer Scroll Canvas        │   REST   │  /api/login     (POST)      │
+│  Engineer Dashboard          │ ◄──────► │  /api/refresh   (POST)      │
+│  Admin Analytics Dashboard   │          │  /api/chat      (POST)      │
+│  Global RAG ChatAssistant    │          │  /api/chat/stream (POST)    │
 └──────────────────────────────┘          │  /api/me        (GET)       │
                                           └──────────┬───────────────────┘
                                                      │
                                           ┌──────────▼───────────────────┐
                                           │  FAISS Vector Store          │
-                                          │  (12 docs, 3072-dim)        │
+                                          │  (12 Enterprise Docs)        │
                                           │  Gemini Embeddings           │
-                                          │  L2 Normalized (cosine sim)  │
-                                          │  Persisted to disk           │
+                                          │  Runtime Role Access Filter  │
                                           └──────────┬───────────────────┘
                                                      │
                                           ┌──────────▼───────────────────┐
-                                          │  Gemini 2.0 Flash (LLM)     │
-                                          │  RAG Pipeline                │
-                                          │  Streaming + Structured resp │
+                                          │  Gemini 1.5 Pro (LLM)        │
+                                          │  Strict Context Grounding    │
+                                          │  Streaming + Attribution     │
                                           └──────────────────────────────┘
 ```
 
-## ✨ Features
+## ✨ Core Features
 
-### Frontend
-- **Scroll-controlled image sequence** – 240 frames rendered on HTML5 Canvas with `object-fit: contain` and Retina/4K scaling
-- **HUD overlay** with 3 scroll phases (Hero → Design → Engine) using Framer Motion
-- **ChatAssistant** – floating AI panel with streaming responses, source attribution, confidence indicators
-- **Auth pages** – premium login/register with role-based access selection
-- **Glassmorphism navbar** – scroll-reactive with INQUIRE button
+### 🧠 Enterprise RAG Agent
+- **Semantic Vector Search:** FAISS index storing high-dimensional `gemini-embedding-001` embeddings of internal Pagani documents.
+- **Strict Role-Based Access Control (RBAC):** RAG context generation is strictly filtered by JWT claims. Viewers cannot retrieve engineering telemetry; Engineers cannot retrieve financial ownership data. 
+- **Zero Hallucination Tolerance:** The system prompt forces the Gemini 1.5 Pro model to answer *only* from the retrieved enterprise context or politely decline.
+- **Streaming Responses:** Real-time token-by-token generation via Server-Sent Events (SSE).
 
-### Backend
-- **FAISS vector store** – 12 Pagani knowledge documents with `faiss.normalize_L2()` for cosine similarity
-- **Gemini embeddings** (`gemini-embedding-001`) – 3072-dimensional vectors
-- **RAG pipeline** – Gemini 2.0 Flash with explicit safety settings, structured responses
-- **JWT authentication** – access + refresh tokens, bcrypt password hashing
-- **RBAC** – 3 roles (admin/engineer/viewer) with document-level access control
-- **Rate limiting** – slowapi (5/min login, 20/min chat)
-- **Streaming** – Server-Sent Events for token-by-token responses
-- **Persistence** – FAISS index saved to disk, skips re-embedding on restart
+### 🛡️ Dynamic Authentication & Routing
+- **Ignition Flow:** Users are greeted with an immersive video sequence before entering the secure login portal.
+- **Next.js Conditional Rendering:** Eradicates layout flicker. Unauthenticated users see the portal; authenticated users are instantly routed to their authorized dashboards via `useRouter`.
+- **JWT Security:** Access and refresh token rotation, bcrypt hashing, and API rate limiting via `slowapi`.
 
-### Security
-- API keys stored in `.env` (never exposed to frontend)
-- JWT tokens with expiration (`exp` claim)
-- Refresh token rotation
-- Rate limiting on auth endpoints
-- CORS restricted to localhost
-- Global error handling
+### 🏎️ Viewer Experience
+- **Cinematic WebGL-style Canvas:** 240 high-resolution frames of the Zonda R manipulated by Framer Motion's `useScroll` hook.
+- **HUD Telemetry Overlay:** Parallax data points fading in through Hero, Design, and Engine phases.
+
+### ⚙️ Executive Dashboards
+- **Engineer Dashboard:** A complex data interface displaying mock telemetry, aerodynamic testing data (Dallara wind tunnel), and component lifecycle tracking.
+- **Admin Dashboard:** An executive SaaS-style interface managing user access logs, global system health, and high-level vehicle financial data.
 
 ## 📁 Project Structure
 
