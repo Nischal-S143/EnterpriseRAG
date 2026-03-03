@@ -4,8 +4,10 @@ Handles document storage, embedding, persistence, and role-based search.
 """
 
 import os
+import re
 import pickle
 import logging
+import math
 import numpy as np
 import faiss
 import google.generativeai as genai
@@ -187,6 +189,33 @@ class VectorStore:
         except Exception as e:
             logger.error(f"Failed to persist FAISS index: {e}")
 
+    def _tokenize(self, text: str) -> list[str]:
+        """Simple tokenizer for keyword search."""
+        return [w.lower() for w in re.findall(r'\b\w+\b', text) if len(w) > 2]
+
+    def _keyword_search(self, query: str, user_role: str, top_k: int) -> list[dict]:
+        """Simple TF keyword search."""
+        query_tokens = set(self._tokenize(query))
+        if not query_tokens:
+            return []
+            
+        results = []
+        for i, doc in enumerate(self.documents):
+            if user_role not in doc["role_access"]:
+                continue
+                
+            doc_tokens = self._tokenize(doc["content"])
+            # Calculate simple TF score based on token overlap
+            score = 0
+            for token in query_tokens:
+                score += doc_tokens.count(token)
+            
+            if score > 0:
+                results.append({"idx": i, "score": score, "doc": doc})
+                
+        results.sort(key=lambda x: x["score"], reverse=True)
+        return results[:top_k]
+
     def search(self, query: str, top_k: int = 3, user_role: str = "viewer") -> list[dict]:
         """
         Semantic search with role-based document filtering.
@@ -195,7 +224,7 @@ class VectorStore:
         if not self._initialized:
             self.initialize()
 
-        # Embed and normalize query
+        # --- 1. Semantic Search (FAISS) ---
         query_embedding = self._embed_query(query)
         faiss.normalize_L2(query_embedding)
 
@@ -203,26 +232,49 @@ class VectorStore:
         search_k = min(top_k * 3, self.index.ntotal)
         scores, indices = self.index.search(query_embedding, search_k)
 
-        # Filter by role access
-        results = []
+        semantic_results = []
         for score, idx in zip(scores[0], indices[0]):
             if idx == -1:
                 continue
             doc = self.documents[idx]
             if user_role in doc["role_access"]:
-                results.append({
-                    "content": doc["content"],
-                    "source": doc["source"],
-                    "score": float(score),
-                })
-            if len(results) >= top_k:
-                break
+                semantic_results.append({"idx": idx, "score": float(score), "doc": doc})
+
+        # --- 2. Keyword Search ---
+        keyword_results = self._keyword_search(query, user_role, search_k)
+        
+        # --- 3. Reciprocal Rank Fusion (RRF) ---
+        # k = 60 is standard in RRF
+        rrf_k = 60
+        fused_scores = {}
+        
+        # Rank semantic results
+        for rank, res in enumerate(semantic_results):
+            fused_scores[res["idx"]] = fused_scores.get(res["idx"], 0) + 1.0 / (rrf_k + rank + 1)
+            
+        # Rank keyword results
+        for rank, res in enumerate(keyword_results):
+            fused_scores[res["idx"]] = fused_scores.get(res["idx"], 0) + 1.0 / (rrf_k + rank + 1)
+            
+        # Sort by fused score
+        fused_results = sorted(list(fused_scores.items()), key=lambda x: x[1], reverse=True)
+        
+        # Build final returning list
+        final_results = []
+        for idx, score in fused_results[:top_k]:
+            doc = self.documents[idx]
+            # Keeping the semantic score interface but it's an RRF score now
+            final_results.append({
+                "content": doc["content"],
+                "source": doc["source"],
+                "score": float(score),
+            })
 
         logger.info(
-            f"Search query='{query[:50]}...' role={user_role} "
-            f"returned {len(results)} results"
+            f"Hybrid search query='{query[:50]}...' role={user_role} "
+            f"returned {len(final_results)} results"
         )
-        return results
+        return final_results
 
 
 # Singleton instance
