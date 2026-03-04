@@ -18,6 +18,28 @@ from dotenv import load_dotenv
 load_dotenv()
 logger = logging.getLogger("pagani.auth")
 
+# ── DB Persistence Helpers (additive, non-breaking) ──
+def _persist_user_to_db(username: str, password_hash: str, role: str):
+    """Persist a registered user to the database (fire-and-forget)."""
+    try:
+        from database import get_db_session
+        from models import User
+        with get_db_session() as db:
+            existing = db.query(User).filter(User.name == username).first()
+            if not existing:
+                db.add(User(name=username, password_hash=password_hash, role=role))
+    except Exception as e:
+        logger.warning(f"DB user persistence failed (non-fatal): {e}")
+
+
+def _log_auth_event(action: str, username: str, metadata: dict | None = None):
+    """Log an auth event to the database (fire-and-forget)."""
+    try:
+        from logging_config import log_event
+        log_event("pagani.auth", action, user_id=username, metadata=metadata)
+    except Exception as e:
+        logger.warning(f"Auth event logging failed (non-fatal): {e}")
+
 # ── Configuration ──
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "pagani-default-secret")
 JWT_REFRESH_SECRET_KEY = os.getenv("JWT_REFRESH_SECRET_KEY", "pagani-refresh-secret")
@@ -233,11 +255,16 @@ def register_user(user: UserRegister) -> dict:
             detail=f"Invalid role. Must be one of: {', '.join(VALID_ROLES)}",
         )
 
+    hashed = hash_password(user.password)
     users_db[user.username] = {
-        "password_hash": hash_password(user.password),
+        "password_hash": hashed,
         "role": user.role,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
+
+    # Persist to DB (additive)
+    _persist_user_to_db(user.username, hashed, user.role)
+    _log_auth_event("user_register", user.username, {"role": user.role})
 
     logger.info(f"User registered: {user.username} (role: {user.role})")
     return {"username": user.username, "role": user.role}
@@ -247,6 +274,7 @@ def authenticate_user(user: UserLogin) -> TokenResponse:
     """Authenticate a user and return JWT tokens."""
     db_user = users_db.get(user.username)
     if not db_user or not verify_password(user.password, db_user["password_hash"]):
+        _log_auth_event("login_failure", user.username)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid username or password",
@@ -255,6 +283,9 @@ def authenticate_user(user: UserLogin) -> TokenResponse:
     token_data = {"sub": user.username, "role": db_user["role"]}
     access_token = create_access_token(token_data)
     refresh_token = create_refresh_token(token_data)
+
+    # Log auth event (additive)
+    _log_auth_event("login_success", user.username, {"role": db_user["role"]})
 
     logger.info(f"User authenticated: {user.username}")
     return TokenResponse(
