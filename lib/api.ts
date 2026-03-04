@@ -8,6 +8,20 @@
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
+// ── Input Sanitization ──
+
+/**
+ * Sanitize user input before sending to the backend.
+ * Strips HTML tags, limits length, and trims whitespace.
+ */
+export function sanitizeInput(input: string, maxLength: number = 2000): string {
+    return input
+        .replace(/<[^>]*>/g, "")  // Strip HTML tags
+        .replace(/[<>]/g, "")     // Remove remaining angle brackets
+        .trim()
+        .slice(0, maxLength);
+}
+
 interface FetchOptions extends RequestInit {
     skipAuth?: boolean;
 }
