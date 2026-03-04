@@ -3,7 +3,8 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { isAuthenticated, getStoredUser } from "@/lib/auth";
-import { apiFetch, apiFetchStream, AuthError } from "@/lib/api";
+import { apiFetch, apiFetchStream, AuthError, sanitizeInput } from "@/lib/api";
+import { logChatRequest, logChatResponse, logError } from "@/lib/logger";
 
 interface Message {
     id: string;
@@ -12,11 +13,35 @@ interface Message {
     sources?: string[];
     confidence?: string;
     isStreaming?: boolean;
+    errorType?: "network" | "ai_unavailable" | "empty_response" | "unknown";
 }
 
 interface ChatAssistantProps {
     isOpen: boolean;
     onClose: () => void;
+}
+
+// ── Simple Markdown Renderer ──
+function renderMarkdown(text: string): string {
+    return text
+        // Code blocks (```...```)
+        .replace(/```(\w*)\n([\s\S]*?)```/g, '<pre class="bg-black/40 rounded-lg p-3 my-2 overflow-x-auto text-xs"><code>$2</code></pre>')
+        // Inline code (`...`)
+        .replace(/`([^`]+)`/g, '<code class="bg-white/10 px-1.5 py-0.5 rounded text-pagani-gold text-xs">$1</code>')
+        // Bold (**...**)
+        .replace(/\*\*(.+?)\*\*/g, '<strong class="text-white font-semibold">$1</strong>')
+        // Italic (*...*)
+        .replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, '<em>$1</em>')
+        // Headings (### ... ## ... # ...)
+        .replace(/^### (.+)$/gm, '<h4 class="text-pagani-gold text-sm font-bold mt-3 mb-1 uppercase tracking-wider">$1</h4>')
+        .replace(/^## (.+)$/gm, '<h3 class="text-pagani-gold text-sm font-bold mt-3 mb-1 uppercase tracking-wider">$1</h3>')
+        .replace(/^# (.+)$/gm, '<h2 class="text-white text-base font-bold mt-3 mb-1">$1</h2>')
+        // Bullet points (- or *)
+        .replace(/^[\-\*] (.+)$/gm, '<li class="ml-4 list-disc text-gray-300">$1</li>')
+        // Numbered lists
+        .replace(/^\d+\. (.+)$/gm, '<li class="ml-4 list-decimal text-gray-300">$1</li>')
+        // Line breaks
+        .replace(/\n/g, '<br />');
 }
 
 export default function ChatAssistant({ isOpen, onClose }: ChatAssistantProps) {
@@ -56,6 +81,19 @@ export default function ChatAssistant({ isOpen, onClose }: ChatAssistantProps) {
 
     const generateId = () => `msg_${Date.now()}_${Math.random().toString(36).slice(2)}`;
 
+    const getErrorMessage = (errorType: string): string => {
+        switch (errorType) {
+            case "network":
+                return "⚠ Network error. Please check your connection and try again.";
+            case "ai_unavailable":
+                return "⚠ The AI service is temporarily unavailable. Please try again in a moment.";
+            case "empty_response":
+                return "⚠ The AI returned an empty response. Please rephrase your question.";
+            default:
+                return "⚠ An unexpected error occurred. Please try again.";
+        }
+    };
+
     const handleSend = async () => {
         if (!input.trim() || isLoading) return;
 
@@ -64,10 +102,13 @@ export default function ChatAssistant({ isOpen, onClose }: ChatAssistantProps) {
             return;
         }
 
+        // Sanitize input before sending
+        const sanitizedInput = sanitizeInput(input.trim());
+
         const userMessage: Message = {
             id: generateId(),
             role: "user",
-            content: input.trim(),
+            content: sanitizedInput,
         };
 
         setMessages((prev) => [...prev, userMessage]);
@@ -75,13 +116,16 @@ export default function ChatAssistant({ isOpen, onClose }: ChatAssistantProps) {
         setIsLoading(true);
         setAuthError(false);
 
+        const startTime = Date.now();
+        logChatRequest(sanitizedInput);
+
         const assistantId = generateId();
 
         try {
             // Try streaming first
             const reader = await apiFetchStream("/api/chat/stream", {
                 method: "POST",
-                body: JSON.stringify({ question: userMessage.content }),
+                body: JSON.stringify({ question: sanitizedInput }),
             });
 
             if (reader) {
@@ -122,14 +166,27 @@ export default function ChatAssistant({ isOpen, onClose }: ChatAssistantProps) {
                     }
                 }
 
-                // Mark streaming complete
-                setMessages((prev) =>
-                    prev.map((m) =>
-                        m.id === assistantId
-                            ? { ...m, isStreaming: false }
-                            : m
-                    )
-                );
+                // Check for empty response
+                if (!fullContent.trim()) {
+                    setMessages((prev) =>
+                        prev.map((m) =>
+                            m.id === assistantId
+                                ? { ...m, content: getErrorMessage("empty_response"), isStreaming: false, errorType: "empty_response" as const }
+                                : m
+                        )
+                    );
+                } else {
+                    // Mark streaming complete
+                    setMessages((prev) =>
+                        prev.map((m) =>
+                            m.id === assistantId
+                                ? { ...m, isStreaming: false }
+                                : m
+                        )
+                    );
+                }
+
+                logChatResponse("success", Date.now() - startTime);
             }
         } catch (error) {
             if (error instanceof AuthError) {
@@ -146,32 +203,56 @@ export default function ChatAssistant({ isOpen, onClose }: ChatAssistantProps) {
                         confidence: string;
                     }>("/api/chat", {
                         method: "POST",
-                        body: JSON.stringify({ question: userMessage.content }),
+                        body: JSON.stringify({ question: sanitizedInput }),
                     });
 
-                    setMessages((prev) => [
-                        ...prev,
-                        {
-                            id: assistantId,
-                            role: "assistant",
-                            content: result.answer,
-                            sources: result.sources,
-                            confidence: result.confidence,
-                        },
-                    ]);
-                } catch (fallbackError) {
-                    if (fallbackError instanceof AuthError) {
-                        setAuthError(true);
+                    if (!result.answer?.trim()) {
+                        setMessages((prev) => [
+                            ...prev,
+                            {
+                                id: assistantId,
+                                role: "assistant",
+                                content: getErrorMessage("empty_response"),
+                                errorType: "empty_response",
+                            },
+                        ]);
                     } else {
                         setMessages((prev) => [
                             ...prev,
                             {
                                 id: assistantId,
                                 role: "assistant",
-                                content:
-                                    "I apologize, but I'm unable to process your request at this time. Please try again.",
+                                content: result.answer,
+                                sources: result.sources,
+                                confidence: result.confidence,
                             },
                         ]);
+                    }
+
+                    logChatResponse("success", Date.now() - startTime);
+                } catch (fallbackError) {
+                    if (fallbackError instanceof AuthError) {
+                        setAuthError(true);
+                    } else {
+                        // Determine error type
+                        const errType = (fallbackError instanceof TypeError)
+                            ? "network" as const
+                            : (fallbackError instanceof Error && fallbackError.message.includes("503"))
+                                ? "ai_unavailable" as const
+                                : "unknown" as const;
+
+                        setMessages((prev) => [
+                            ...prev,
+                            {
+                                id: assistantId,
+                                role: "assistant",
+                                content: getErrorMessage(errType),
+                                errorType: errType,
+                            },
+                        ]);
+
+                        logError("chat_error", fallbackError);
+                        logChatResponse("error", Date.now() - startTime);
                     }
                 }
             }
@@ -282,19 +363,29 @@ export default function ChatAssistant({ isOpen, onClose }: ChatAssistantProps) {
                                     key={msg.id}
                                     initial={{ opacity: 0, y: 8 }}
                                     animate={{ opacity: 1, y: 0 }}
-                                    transition={{ duration: 0.2 }}
+                                    transition={{ duration: 0.3, ease: "easeOut" }}
                                     className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"
                                         }`}
                                 >
                                     <div
                                         className={`max-w-[85%] rounded-xl px-4 py-3 text-sm leading-relaxed ${msg.role === "user"
-                                                ? "bg-pagani-gold/15 text-white border border-pagani-gold/20"
-                                                : msg.role === "system"
-                                                    ? "bg-carbon-gray/50 text-gray-400 border border-white/5 text-center w-full text-xs"
+                                            ? "bg-pagani-gold/15 text-white border border-pagani-gold/20"
+                                            : msg.role === "system"
+                                                ? "bg-carbon-gray/50 text-gray-400 border border-white/5 text-center w-full text-xs"
+                                                : msg.errorType
+                                                    ? "bg-red-500/10 text-red-300 border border-red-500/20"
                                                     : "bg-white/5 text-gray-200 border border-white/10"
                                             }`}
                                     >
-                                        <p className="whitespace-pre-wrap">{msg.content}</p>
+                                        {/* Render markdown for assistant messages, plain text for others */}
+                                        {msg.role === "assistant" && !msg.errorType ? (
+                                            <div
+                                                className="prose prose-invert prose-sm max-w-none whitespace-pre-wrap"
+                                                dangerouslySetInnerHTML={{ __html: renderMarkdown(msg.content) }}
+                                            />
+                                        ) : (
+                                            <p className="whitespace-pre-wrap">{msg.content}</p>
+                                        )}
 
                                         {/* Streaming indicator */}
                                         {msg.isStreaming && (
@@ -311,10 +402,10 @@ export default function ChatAssistant({ isOpen, onClose }: ChatAssistantProps) {
                                                     {msg.confidence && (
                                                         <span
                                                             className={`text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded-full ${msg.confidence === "high"
-                                                                    ? "bg-green-500/20 text-green-400"
-                                                                    : msg.confidence === "medium"
-                                                                        ? "bg-yellow-500/20 text-yellow-400"
-                                                                        : "bg-red-500/20 text-red-400"
+                                                                ? "bg-green-500/20 text-green-400"
+                                                                : msg.confidence === "medium"
+                                                                    ? "bg-yellow-500/20 text-yellow-400"
+                                                                    : "bg-red-500/20 text-red-400"
                                                                 }`}
                                                         >
                                                             {msg.confidence}
@@ -335,31 +426,48 @@ export default function ChatAssistant({ isOpen, onClose }: ChatAssistantProps) {
                                 </motion.div>
                             ))}
 
-                            {/* Loading indicator */}
+                            {/* Enhanced Loading indicator */}
                             {isLoading && (
                                 <motion.div
-                                    initial={{ opacity: 0 }}
-                                    animate={{ opacity: 1 }}
+                                    initial={{ opacity: 0, y: 8 }}
+                                    animate={{ opacity: 1, y: 0 }}
+                                    transition={{ duration: 0.3 }}
                                     className="flex justify-start"
                                 >
-                                    <div className="bg-white/5 border border-white/10 rounded-xl px-4 py-3 flex items-center gap-2">
-                                        <div className="flex gap-1">
-                                            <span
-                                                className="w-1.5 h-1.5 bg-pagani-gold rounded-full animate-bounce"
-                                                style={{ animationDelay: "0ms" }}
-                                            />
-                                            <span
-                                                className="w-1.5 h-1.5 bg-pagani-gold rounded-full animate-bounce"
-                                                style={{ animationDelay: "150ms" }}
-                                            />
-                                            <span
-                                                className="w-1.5 h-1.5 bg-pagani-gold rounded-full animate-bounce"
-                                                style={{ animationDelay: "300ms" }}
+                                    <div className="bg-white/5 border border-white/10 rounded-xl px-4 py-3">
+                                        <div className="flex items-center gap-3">
+                                            <div className="flex gap-1">
+                                                <span
+                                                    className="w-1.5 h-1.5 bg-pagani-gold rounded-full animate-bounce"
+                                                    style={{ animationDelay: "0ms" }}
+                                                />
+                                                <span
+                                                    className="w-1.5 h-1.5 bg-pagani-gold rounded-full animate-bounce"
+                                                    style={{ animationDelay: "150ms" }}
+                                                />
+                                                <span
+                                                    className="w-1.5 h-1.5 bg-pagani-gold rounded-full animate-bounce"
+                                                    style={{ animationDelay: "300ms" }}
+                                                />
+                                            </div>
+                                            <span className="text-xs text-pagani-gold/70 tracking-wider uppercase animate-pulse">
+                                                AI is thinking...
+                                            </span>
+                                        </div>
+                                        {/* Typing animation bar */}
+                                        <div className="mt-2 h-0.5 bg-pagani-gold/10 rounded-full overflow-hidden">
+                                            <motion.div
+                                                className="h-full bg-pagani-gold/40 rounded-full"
+                                                initial={{ x: "-100%" }}
+                                                animate={{ x: "100%" }}
+                                                transition={{
+                                                    repeat: Infinity,
+                                                    duration: 1.5,
+                                                    ease: "easeInOut",
+                                                }}
+                                                style={{ width: "40%" }}
                                             />
                                         </div>
-                                        <span className="text-xs text-gray-500">
-                                            Processing...
-                                        </span>
                                     </div>
                                 </motion.div>
                             )}
@@ -388,7 +496,7 @@ export default function ChatAssistant({ isOpen, onClose }: ChatAssistantProps) {
                                 <button
                                     onClick={handleSend}
                                     disabled={isLoading || !input.trim() || authError}
-                                    className="px-4 py-2.5 bg-pagani-gold/15 border border-pagani-gold/30 rounded-lg text-pagani-gold hover:bg-pagani-gold hover:text-black transition-all disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-pagani-gold/15 disabled:hover:text-pagani-gold"
+                                    className="px-4 py-2.5 bg-pagani-gold/15 border border-pagani-gold/30 rounded-lg text-pagani-gold hover:bg-pagani-gold hover:text-black transition-all duration-200 disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-pagani-gold/15 disabled:hover:text-pagani-gold active:scale-95"
                                 >
                                     <svg
                                         width="18"
