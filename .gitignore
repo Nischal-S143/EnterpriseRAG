@@ -43,6 +43,8 @@ venv/
 # FAISS persistence
 *.bin
 *.pkl
+!backend/faiss_index.bin
+!backend/faiss_meta.pkl
 
 # vercel
 .vercel
