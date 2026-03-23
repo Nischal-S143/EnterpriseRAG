@@ -29,6 +29,11 @@ export default function Home() {
     } else {
       document.body.style.overflow = "";
     }
+    
+    // Cleanup to ensure we never permanently lock scroll if component unmounts
+    return () => {
+      document.body.style.overflow = "";
+    };
   }, [showIgnition]);
 
   useEffect(() => {

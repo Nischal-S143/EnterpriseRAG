@@ -11,6 +11,7 @@ export default function LoginPage() {
     const [password, setPassword] = useState("");
     const [error, setError] = useState("");
     const [isLoading, setIsLoading] = useState(false);
+    const [isSuccess, setIsSuccess] = useState(false);
     const [showPassword, setShowPassword] = useState(false);
     const [isCapsLockOn, setIsCapsLockOn] = useState(false);
 
@@ -20,46 +21,50 @@ export default function LoginPage() {
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
+        if (isLoading || isSuccess) return;
         setError("");
         setIsLoading(true);
 
         try {
             const data = await login(username, password);
-
-            if (data.role === "admin") {
-                router.push("/dashboard/admin");
-            } else if (data.role === "engineer") {
-                router.push("/dashboard/engineer");
-            } else {
-                router.push("/");
-            }
+            setIsSuccess(true);
+            setIsLoading(false);
+            
+            setTimeout(() => {
+                if (data.role === "admin") {
+                    router.push("/dashboard/admin");
+                } else if (data.role === "engineer") {
+                    router.push("/dashboard/engineer");
+                } else {
+                    router.push("/");
+                }
+            }, 500);
         } catch (err: unknown) {
             setError(
                 err instanceof Error
                     ? err.message
                     : "Login failed. Please try again."
             );
-        } finally {
             setIsLoading(false);
         }
     };
 
     return (
-        <main className="relative min-h-screen flex items-center justify-center px-4 py-12 overflow-y-auto overflow-x-hidden">
+        <main className="relative min-h-[100dvh] w-full flex flex-col items-center justify-center py-12 px-4 sm:px-6 lg:px-8 overflow-x-hidden">
             
             {/* Background Image */}
             <div
-                className="absolute inset-0 bg-cover bg-center"
+                className="fixed inset-0 bg-cover bg-center -z-10"
                 style={{
                     backgroundImage: "url('/images/pagani-bg.png')",
                 }}
             />
 
             {/* Dark Overlay */}
-            <div className="absolute inset-0 bg-black/75 backdrop-blur-[2px]" />
+            <div className="fixed inset-0 bg-black/75 backdrop-blur-[2px] -z-10" />
 
             {/* Gold Accent Glow */}
-            <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_center,_rgba(212,175,55,0.08)_0%,_transparent_60%)]" />
+            <div className="fixed inset-0 bg-[radial-gradient(ellipse_at_center,_rgba(212,175,55,0.08)_0%,_transparent_60%)] -z-10" />
 
             <motion.div
                 initial={{ opacity: 0, y: 20 }}
@@ -163,10 +168,10 @@ export default function LoginPage() {
 
                         <button
                             type="submit"
-                            disabled={isLoading}
+                            disabled={isLoading || isSuccess}
                             className="w-full py-3 bg-pagani-gold/20 border border-pagani-gold/40 text-pagani-gold text-sm font-bold tracking-[0.15em] uppercase rounded-lg hover:bg-pagani-gold hover:text-black transition-all disabled:opacity-50"
                         >
-                            {isLoading ? "Authenticating..." : "Sign In"}
+                            {isLoading ? "Authenticating..." : isSuccess ? "Success! Redirecting..." : "Sign In"}
                         </button>
                     </form>
 
