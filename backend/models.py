@@ -6,7 +6,7 @@ SQLAlchemy ORM models for Users, ChatHistory, SystemLogs, and Analytics.
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Column, String, Text, DateTime, ForeignKey, JSON
+from sqlalchemy import Column, String, Text, DateTime, ForeignKey, JSON, Float, Integer
 from sqlalchemy.orm import relationship
 
 from database import Base
@@ -98,6 +98,7 @@ class Document(Base):
     uploaded_by = Column(String(50), nullable=False, index=True)
     title = Column(String(255), nullable=True)
     tags = Column(JSON, nullable=True, default=list)
+    classification = Column(String(50), nullable=True)
     version = Column(String(10), nullable=False, default="1")
     created_at = Column(DateTime(timezone=True), default=_utcnow, index=True)
     updated_at = Column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
@@ -118,3 +119,101 @@ class RoleAuditLog(Base):
 
     def __repr__(self):
         return f"<RoleAuditLog(target='{self.target_user}', {self.old_role}->{self.new_role})>"
+
+
+class Evaluation(Base):
+    __tablename__ = "evaluations"
+
+    id = Column(String(36), primary_key=True, default=_generate_uuid)
+    query = Column(Text, nullable=False)
+    response_snippet = Column(Text, nullable=True)
+    relevance = Column(Float, nullable=True)
+    faithfulness = Column(Float, nullable=True)
+    completeness = Column(Float, nullable=True)
+    overall = Column(Float, nullable=True)
+    precision = Column(Float, nullable=True)
+    recall = Column(Float, nullable=True)
+    f1_score = Column(Float, nullable=True)
+    confidence_score = Column(Float, nullable=True)
+    latency_ms = Column(Float, nullable=True)
+    estimated_cost_usd = Column(Float, nullable=True)
+    reasoning = Column(Text, nullable=True)
+    metadata_ = Column("metadata", JSON, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, index=True)
+
+    def __repr__(self):
+        return f"<Evaluation(query='{self.query[:40]}...', overall={self.overall})>"
+
+
+class AuditLog(Base):
+    __tablename__ = "audit_logs"
+
+    id = Column(String(36), primary_key=True, default=_generate_uuid)
+    action = Column(String(100), nullable=False, index=True)
+    user_id = Column(String(50), nullable=True, index=True)
+    details = Column(Text, nullable=True)
+    metadata_ = Column("metadata", JSON, nullable=True)
+    timestamp = Column(DateTime(timezone=True), default=_utcnow, index=True)
+
+    def __repr__(self):
+        return f"<AuditLog(action='{self.action}', user='{self.user_id}')>"
+
+
+class ReviewQueue(Base):
+    __tablename__ = "review_queue"
+
+    id = Column(String(36), primary_key=True, default=_generate_uuid)
+    username = Column(String(50), nullable=False, index=True)
+    question = Column(Text, nullable=False)
+    reason = Column(String(255), nullable=False)
+    status = Column(String(30), nullable=False, default="pending_review", index=True)
+    confidence = Column(Float, nullable=True)
+    metadata_ = Column("metadata", JSON, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, index=True)
+    resolved_at = Column(DateTime(timezone=True), nullable=True)
+
+    def __repr__(self):
+        return f"<ReviewQueue(user='{self.username}', status='{self.status}')>"
+
+
+class Feedback(Base):
+    __tablename__ = "feedback"
+
+    id = Column(String(36), primary_key=True, default=_generate_uuid)
+    user_id = Column(String(50), nullable=True, index=True)
+    query = Column(Text, nullable=False)
+    response = Column(Text, nullable=True)
+    rating = Column(Integer, nullable=True)
+    comment = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, index=True)
+
+    def __repr__(self):
+        return f"<Feedback(user='{self.user_id}', rating={self.rating})>"
+
+
+class StrategistReport(Base):
+    __tablename__ = "strategist_reports"
+
+    id = Column(String(36), primary_key=True, default=_generate_uuid)
+    report = Column(Text, nullable=False)
+    analyzed_count = Column(Integer, nullable=True)
+    metadata_ = Column("metadata", JSON, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, index=True)
+
+    def __repr__(self):
+        return f"<StrategistReport(analyzed={self.analyzed_count})>"
+
+
+class GoldenAnswer(Base):
+    __tablename__ = "golden_answers"
+
+    id = Column(String(36), primary_key=True, default=_generate_uuid)
+    query = Column(Text, nullable=False)
+    expected_answer = Column(Text, nullable=False)
+    relevant_chunk_ids = Column(JSON, nullable=True)
+    tags = Column(JSON, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, index=True)
+    updated_at = Column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+
+    def __repr__(self):
+        return f"<GoldenAnswer(query='{self.query[:40]}...')>"

@@ -10,15 +10,22 @@ import logging
 import json
 import numpy as np
 import faiss
-import google.generativeai as genai
+from sentence_transformers import SentenceTransformer
+from openai import OpenAI
+try:
+    from rank_bm25 import BM25Okapi
+except ImportError:
+    BM25Okapi = None
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 logger = logging.getLogger("pagani.vector_store")
 
-# ── Gemini Configuration ──
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-EMBEDDING_MODEL = "models/gemini-embedding-001"
+# ── API Configuration ──
+api_key = os.getenv("GROQ_API_KEY") # Groq Key
+client = OpenAI(base_url="https://api.groq.com/openai/v1", api_key=api_key, timeout=15.0, max_retries=1)
+EMBEDDING_MODEL = "all-MiniLM-L6-v2"
+embedding_model = SentenceTransformer(EMBEDDING_MODEL)
 
 # ── Persistence Paths ──
 INDEX_PATH = os.path.join(os.path.dirname(__file__), "faiss_index.bin")
@@ -90,6 +97,8 @@ PAGANI_DOCUMENTS = [
 ]
 
 
+import threading
+
 class VectorStore:
     """FAISS-based vector store with Gemini embeddings and role-based filtering."""
 
@@ -98,7 +107,9 @@ class VectorStore:
         self.index: faiss.IndexFlatIP | None = None
         self.embeddings: np.ndarray | None = None
         self.dimension: int | None = None
+        self.bm25_index = None
         self._initialized = False
+        self._lock = threading.Lock()  # Thread safety for FAISS read/write
 
     def initialize(self):
         """Load from persistence or build fresh index."""
@@ -114,6 +125,22 @@ class VectorStore:
                 self.embeddings = meta["embeddings"]
                 self.dimension = meta["dimension"]
                 self.documents = meta["documents"]
+                
+                # Load BM25 if exists
+                bm25_path = os.path.join(os.path.dirname(__file__), "bm25_index.pkl")
+                if os.path.exists(bm25_path):
+                    with open(bm25_path, "rb") as f:
+                        self.bm25_index = pickle.load(f)
+                else:
+                    # Rebuild if missing
+                    if BM25Okapi is not None:
+                        tokenized_corpus = []
+                        for doc in self.documents:
+                            text = doc.get("content", "")
+                            heading = doc.get("heading_path", "")
+                            tokenized_corpus.append(self._tokenize(f"{heading} {text}".strip()))
+                        self.bm25_index = BM25Okapi(tokenized_corpus)
+                        
                 self._initialized = True
                 logger.info(f"Loaded FAISS index: {self.index.ntotal} vectors, dim={self.dimension}")
                 return
@@ -155,7 +182,18 @@ class VectorStore:
             self._build_index()
         else:
             # Embed only the new chunks
-            new_texts = [doc["content"] for doc in chunks]
+            # Embed only the new chunks, fusing heading context into the embedding text
+            new_texts = []
+            for doc in chunks:
+                base_text = doc.get("content", doc.get("text", ""))
+                heading = doc.get("heading_path", "")
+                keywords = " ".join(doc.get("metadata", {}).get("keywords", []))
+                
+                context_fused = base_text
+                if heading or keywords:
+                    context_fused = f"Heading: {heading}\nKeywords: {keywords}\n\n{base_text}"
+                new_texts.append(context_fused)
+                
             new_embeddings = self._embed_texts(new_texts)
             
             # Normalize new embeddings
@@ -167,66 +205,35 @@ class VectorStore:
             # Add to FAISS index
             self.index.add(new_embeddings)
             
+            # Rebuild BM25 for the entire corpus Incorporating Headers
+            if BM25Okapi is not None:
+                tokenized_corpus = []
+                for doc in self.documents:
+                    text = doc.get("content", "")
+                    heading = doc.get("heading_path", "")
+                    tokenized_corpus.append(self._tokenize(f"{heading} {text}".strip()))
+                self.bm25_index = BM25Okapi(tokenized_corpus)
+                
+            self._persist()
             logger.info(f"FAISS index updated: {self.index.ntotal} vectors total")
             
-            # Persist the updated state
-            self._persist()
-
     def _embed_texts(self, texts: list[str]) -> np.ndarray:
-        """Embed a list of texts using Gemini using batches to avoid rate limits."""
-        all_embeddings = []
-        batch_size = 20
-        import time
-        
-        for i in range(0, len(texts), batch_size):
-            batch = texts[i:i+batch_size]
-            try:
-                logger.info(f"Embedding batch {i//batch_size + 1}/{(len(texts) + batch_size - 1)//batch_size}...")
-                result = genai.embed_content(
-                    model=EMBEDDING_MODEL,
-                    content=batch,
-                    task_type="retrieval_document",
-                )
-                embeddings = np.array(result["embedding"], dtype=np.float32)
-                if embeddings.ndim == 1:
-                    embeddings = embeddings.reshape(1, -1)
-                all_embeddings.append(embeddings)
-                
-                # Sleep to respect rate limits (e.g., Gemini Free Tier is 15 RPM)
-                if i + batch_size < len(texts):
-                    time.sleep(5)
-            except Exception as e:
-                logger.error(f"Embedding batch generation failed: {e}")
-                # Try to sleep longer and retry once
-                logger.info("Sleeping 30s and retrying batch...")
-                time.sleep(30)
-                try:
-                    result = genai.embed_content(
-                        model=EMBEDDING_MODEL,
-                        content=batch,
-                        task_type="retrieval_document",
-                    )
-                    embeddings = np.array(result["embedding"], dtype=np.float32)
-                    if embeddings.ndim == 1:
-                        embeddings = embeddings.reshape(1, -1)
-                    all_embeddings.append(embeddings)
-                except Exception as retry_e:
-                    logger.error(f"Retry failed: {retry_e}")
-                    raise RuntimeError(f"Failed to generate embeddings: {retry_e}")
-
-        final_embeddings = np.vstack(all_embeddings) if all_embeddings else np.array([])
-        logger.info(f"Embedded {len(texts)} total texts, shape: {final_embeddings.shape}")
-        return final_embeddings
+        """Embed a list of texts using local SentenceTransformer."""
+        logger.info(f"Embedding {len(texts)} texts locally...")
+        try:
+            embeddings = embedding_model.encode(texts, convert_to_numpy=True).astype(np.float32)
+            if embeddings.ndim == 1:
+                embeddings = embeddings.reshape(1, -1)
+            logger.info(f"Embedded {len(texts)} total texts, shape: {embeddings.shape}")
+            return embeddings
+        except Exception as e:
+            logger.error(f"Failed to generate embeddings: {e}")
+            raise RuntimeError(f"Failed to generate embeddings: {e}")
 
     def _embed_query(self, query: str) -> np.ndarray:
-        """Embed a single query using Gemini text-embedding-004."""
+        """Embed a single query using local SentenceTransformer."""
         try:
-            result = genai.embed_content(
-                model=EMBEDDING_MODEL,
-                content=query,
-                task_type="retrieval_query",
-            )
-            embedding = np.array(result["embedding"], dtype=np.float32).reshape(1, -1)
+            embedding = embedding_model.encode([query], convert_to_numpy=True).astype(np.float32)
             return embedding
         except Exception as e:
             logger.error(f"Query embedding failed: {e}")
@@ -235,8 +242,23 @@ class VectorStore:
     def _build_index(self):
         """Build FAISS index from documents and persist to disk."""
         logger.info("Building FAISS index from scratch...")
-        texts = [doc["content"] for doc in self.documents]
-        self.embeddings = self._embed_texts(texts)
+        
+        # Ensure documents are initialized
+        if not self.documents:
+            self.documents = PAGANI_DOCUMENTS
+            
+        texts_to_embed = []
+        for doc in self.documents:
+            base_text = doc.get("content", doc.get("text", ""))
+            heading = doc.get("heading_path", "")
+            keywords = " ".join(doc.get("metadata", {}).get("keywords", []))
+            
+            context_fused = base_text
+            if heading or keywords:
+                context_fused = f"Heading: {heading}\nKeywords: {keywords}\n\n{base_text}"
+            texts_to_embed.append(context_fused)
+            
+        self.embeddings = self._embed_texts(texts_to_embed)
 
         # Dynamic dimension detection
         self.dimension = self.embeddings.shape[1]
@@ -254,7 +276,7 @@ class VectorStore:
         self._persist()
 
     def _persist(self):
-        """Save FAISS index and metadata to disk."""
+        """Save FAISS and BM25 indexes and metadata to disk."""
         try:
             faiss.write_index(self.index, INDEX_PATH)
             with open(META_PATH, "wb") as f:
@@ -264,12 +286,34 @@ class VectorStore:
                     "documents": self.documents,
                 }, f)
             logger.info("FAISS index persisted to disk.")
+            
+            # Rebuild and persist BM25 index over the entire synchronized corpus
+            if BM25Okapi is not None:
+                tokenized_corpus = []
+                for doc in self.documents:
+                    text = doc.get("content", "")
+                    heading = doc.get("heading_path", "")
+                    tokenized_corpus.append(self._tokenize(f"{heading} {text}".strip()))
+                self.bm25_index = BM25Okapi(tokenized_corpus)
+                bm25_path = os.path.join(os.path.dirname(__file__), "bm25_index.pkl")
+                with open(bm25_path, "wb") as f:
+                    pickle.dump(self.bm25_index, f)
+                logger.info(f"BM25 index rebuilt and persisted for {len(self.documents)} chunks.")
+            else:
+                logger.warning("rank_bm25 is not installed. Skipping BM25 index generation.")
+            
         except Exception as e:
-            logger.error(f"Failed to persist FAISS index: {e}")
+            logger.error(f"Failed to persist indexes: {e}")
 
     def _tokenize(self, text: str) -> list[str]:
-        """Simple tokenizer for keyword search."""
-        return [w.lower() for w in re.findall(r'\b\w+\b', text) if len(w) > 2]
+        """Tokenize text for BM25. Includes basic expansion for common terms like price/pricing."""
+        tokens = re.findall(r'\w+', text.lower())
+        # Basic expansion for pricing/price
+        if 'pricing' in tokens and 'price' not in tokens:
+            tokens.append('price')
+        elif 'price' in tokens and 'pricing' not in tokens:
+            tokens.append('pricing')
+        return tokens
 
     def _keyword_search(self, query: str, user_role: str, top_k: int) -> list[dict]:
         """Simple TF keyword search."""
@@ -279,7 +323,7 @@ class VectorStore:
             
         results = []
         for i, doc in enumerate(self.documents):
-            if user_role not in doc["role_access"]:
+            if user_role not in doc.get("role_access", ["viewer", "seller", "admin"]):
                 continue
                 
             doc_tokens = self._tokenize(doc["content"])
@@ -294,38 +338,86 @@ class VectorStore:
         results.sort(key=lambda x: x["score"], reverse=True)
         return results[:top_k]
 
+    def _get_semantic_score(self, faiss_distance: float) -> float:
+        """Convert FAISS L2 distance to a 0-100 confidence score."""
+        # FAISS L2 with normalized vectors ranges from 0.0 to 2.0 (0.0 is perfect).
+        # We assume distances > 1.2 are largely irrelevant.
+        confidence = max(0.0, 1.0 - (float(faiss_distance) / 1.25))
+        return confidence * 100.0
+
+
     def _llm_rerank(self, query: str, candidates: list[dict], top_k: int) -> list[dict]:
-        """Use Gemini to rerank candidates based on relevance to the query (0-100 score)."""
-        if not candidates:
-            return []
-            
         try:
-            model = genai.GenerativeModel("gemini-2.5-flash")
-            
             prompt = f"Given the user query: '{query}'\n\n"
-            prompt += "Score each of the following document chunks on how accurately and completely it answers the query. "
-            prompt += "Return a JSON array of objects, where each object has 'idx' (int) and 'relevance_score' (int from 0 to 100).\n\n"
+            prompt += "Score each document chunk based on its direct relevance to the query. "
+            prompt += "Use a scale of 0 to 100 (0=Irrelevant, 50=Partial Match, 100=Perfect Answer).\n"
+            prompt += "Return ONLY a JSON array of integers, where the i-th integer is the score for [Chunk i].\n\n"
             
             for i, cand in enumerate(candidates):
-                content = cand['doc']['content'][:500].replace('\n', ' ')
-                prompt += f"[Chunk {i}] Source: {cand['doc']['source']}\nContent: {content}...\n\n"
+                content = cand['doc']['content'][:600].replace('\n', ' ')
+                prompt += f"[Chunk {i}]: {content}...\n\n"
                 
-            response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
-            scores = json.loads(response.text)
-            
-            # Map scores back to candidates
-            for cand, score_dict in zip(candidates, scores):
-                cand['score'] = float(score_dict.get('relevance_score', 0))
-                
-            # Sort by new confidence score
-            candidates.sort(key=lambda x: x['score'], reverse=True)
-            return candidates[:top_k]
+            for attempt in range(2):
+                try:
+                    response = client.chat.completions.create(
+                        model="llama-3.1-8b-instant",
+                        messages=[{"role": "user", "content": prompt}],
+                    )
+                    text = response.choices[0].message.content.strip()
+                    logger.debug(f"LLM Rerank Raw Response: {text}")
+                    
+                    # Robust parsing: Extract digits from the response if it's not a clean JSON
+                    import re
+                    scores = []
+                    
+                    if "[" in text and "]" in text:
+                        # Try to extract the array part
+                        array_str = text[text.find("[") : text.rfind("]") + 1]
+                        try:
+                            scores = json.loads(array_str)
+                        except:
+                            # Fallback re-parse
+                            scores = [int(s) for s in re.findall(r"\d+", array_str)]
+                    else:
+                        # Fallback try to find any numbers
+                        scores = [int(s) for s in re.findall(r"\d+", text)]
+                        
+                    if len(scores) < len(candidates):
+                        logger.warning(f"Reranker returned {len(scores)} scores for {len(candidates)} candidates. Padding...")
+                        scores.extend([0] * (len(candidates) - len(scores)))
+                        
+                    # Map scores back to candidates
+                    for cand, score in zip(candidates, scores):
+                        llm_score = float(score)
+                        # Safety fallback: if LLM returns < 10 but semantic distance is low, use semantic boost
+                        if llm_score < 10.0 and cand.get('dist', 2.0) < 0.8:
+                            semantic_boost = max(0.0, 1.0 - (cand.get('dist', 2.0) / 1.2)) * 100.0
+                            cand['score'] = max(llm_score, semantic_boost)
+                        else:
+                            cand['score'] = llm_score
+                        
+                    # Sort and log
+                    candidates.sort(key=lambda x: x['score'], reverse=True)
+                    top_scores = [c['score'] for c in candidates[:5]]
+                    logger.info(f"LLM Reranking (Success). Top scores: {top_scores}")
+                    return candidates[:top_k]
+                    
+                except Exception as e:
+                    if attempt == 0:
+                        logger.warning(f"Reranking attempt 1 failed: {e}. Retrying...")
+                        continue
+                    raise e
             
         except Exception as e:
-            logger.error(f"LLM Reranking failed: {e}")
-            # Fallback to RRF scores
+            logger.error(f"LLM Reranking failed completely: {e}")
+            # Fallback to Semantic scores scaled to 0-100
+            for cand in candidates:
+                cand['score'] = self._get_semantic_score(cand['score'])
+            
+            candidates.sort(key=lambda x: x['score'], reverse=True)
+            top_scores = [round(c['score'], 1) for c in candidates[:5]]
+            logger.info(f"Reranking Fallback (Semantic). Top scores: {top_scores}")
             return candidates[:top_k]
-
     def search(self, query: str, top_k: int = 5, user_role: str = "viewer", filters: dict = None) -> list[dict]:
         """
         Semantic search with Gen-2 features: Role filtering, Metadata filters, and LLM Reranking.
@@ -350,7 +442,7 @@ class VectorStore:
             doc = self.documents[idx]
             
             # 1a. Filter by Role
-            if user_role not in doc["role_access"]:
+            if user_role not in doc.get("role_access", ["viewer", "seller", "admin"]):
                 continue
                 
             # 1b. Filter by Metadata (if any)
@@ -397,9 +489,11 @@ class VectorStore:
         for res in reranked_results:
             doc = res["doc"]
             final_results.append({
-                "content": doc["content"],
-                "source": doc["source"],
+                "content": doc.get("content", doc.get("text", "")),
+                "source": doc.get("source", "Unknown"),
+                "uploaded_by": doc.get("uploaded_by", "System"),
                 "score": res["score"],  # This is now an LLM confidence score (0-100)
+                "doc_id": doc.get("doc_id", doc.get("document_id")),
             })
 
         logger.info(

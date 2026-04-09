@@ -52,26 +52,12 @@ def setup_logging(level: str = "INFO"):
     )
 
 
-def log_event(
-    logger_name: str,
-    action: str,
-    user_id: str | None = None,
-    metadata: dict | None = None,
-):
-    """
-    Log a structured event and persist to DB (non-blocking).
-    Events: user_login, role_routing, chat_request, chat_response,
-            api_error, system_health_check, login_success, login_failure
-    """
-    log = logging.getLogger(logger_name)
-    parts = [f"action={action}"]
-    if user_id:
-        parts.append(f"user={user_id}")
-    if metadata:
-        parts.append(f"meta={metadata}")
-    log.info(" | ".join(parts))
+from concurrent.futures import ThreadPoolExecutor
+# Global thread pool for fire-and-forget DB logging
+_log_executor = ThreadPoolExecutor(max_workers=2)
 
-    # Persist to SystemLogs table (fire-and-forget)
+def _persist_log_to_db(action: str, user_id: str | None, metadata: dict | None):
+    """Internal helper to write a log event to the database (synchronous)."""
     try:
         from database import get_db_session
         from models import SystemLog
@@ -82,4 +68,25 @@ def log_event(
                 metadata_=metadata,
             ))
     except Exception as e:
-        log.warning(f"Failed to persist log event to DB: {e}")
+        # Avoid crashing the logger if DB is unavailable
+        pass
+
+def log_event(
+    logger_name: str,
+    action: str,
+    user_id: str | None = None,
+    metadata: dict | None = None,
+):
+    """
+    Log a structured event. The database write is completely non-blocking (fire-and-forget).
+    """
+    log = logging.getLogger(logger_name)
+    parts = [f"action={action}"]
+    if user_id:
+        parts.append(f"user={user_id}")
+    if metadata:
+        parts.append(f"meta={metadata}")
+    log.info(" | ".join(parts))
+
+    # Fire-and-forget: offload database write to the thread pool instantly
+    _log_executor.submit(_persist_log_to_db, action, user_id, metadata)

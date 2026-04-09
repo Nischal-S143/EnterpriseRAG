@@ -34,19 +34,28 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             "camera=(), microphone=(), geolocation=(), payment=()"
         )
         # Content Security Policy (basic)
+        # connect-src must allow the frontend origin for cross-origin API calls
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; script-src 'self' 'unsafe-inline'; "
             "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
-            "font-src 'self'; connect-src 'self'"
+            "font-src 'self'; connect-src 'self' http://localhost:3000 http://127.0.0.1:3000"
         )
 
         return response
+
+
+# Routes exempt from the default 1MB body limit (e.g. file uploads have their own validation)
+SIZE_LIMIT_EXEMPT_PATHS = {"/api/v1/documents/upload"}
 
 
 class RequestSizeLimitMiddleware(BaseHTTPMiddleware):
     """Reject requests with bodies exceeding the size limit."""
 
     async def dispatch(self, request: Request, call_next):
+        # Skip size check for file upload routes (they have their own limits)
+        if request.url.path in SIZE_LIMIT_EXEMPT_PATHS:
+            return await call_next(request)
+
         content_length = request.headers.get("content-length")
 
         if content_length and int(content_length) > MAX_REQUEST_SIZE:

@@ -247,3 +247,74 @@ def export_analytics_csv(days: int = 30) -> str:
     except Exception as e:
         logger.error(f"Failed to export analytics: {e}")
         return f"Error: {e}"
+
+# ═══════════════════════════════════════════
+# Strategist AI Agent
+# ═══════════════════════════════════════════
+
+import asyncio
+import json
+import os
+from openai import OpenAI
+from dotenv import load_dotenv
+from audit import Auditor
+
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
+
+api_key = os.getenv("GROQ_API_KEY") # Groq Key
+client = OpenAI(base_url="https://api.groq.com/openai/v1", api_key=api_key)
+
+class Strategist:
+    """
+    Runs every 24 hours.
+    Analyzes low-confidence queries using AI.
+    Stores reports in database.
+    """
+    def __init__(self, model_name="llama-3.3-70b-versatile"):
+        self.model_name = model_name
+
+    async def start_background_task(self):
+        """Starts the 24-hour loop."""
+        asyncio.create_task(self.run_daily_analysis())
+
+    async def run_daily_analysis(self):
+        while True:
+            try:
+                self.analyze_low_confidence_queries()
+            except Exception as e:
+                logger.error(f"Strategist analysis failed: {e}")
+            await asyncio.sleep(24 * 60 * 60) # 24 hours
+
+    def analyze_low_confidence_queries(self):
+        from auth import review_queue
+        
+        low_conf_queries = [v["question"] for v in review_queue.values() if v["status"] == "pending_review"]
+        
+        if not low_conf_queries:
+            logger.info("Strategist: No low confidence queries to analyze.")
+            return
+
+        prompt = f"Analyze these low-confidence or flagged user queries and suggest improvements to the knowledge base or retrieval strategy:\\n\\n{json.dumps(low_conf_queries, indent=2)}\\n\\nProvide a structured report."
+        
+        try:
+            response = client.chat.completions.create(
+                model=self.model_name,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            report = response.choices[0].message.content
+            
+            # Store report in database
+            Auditor.log(
+                action="strategist_daily_report",
+                user_id="system_strategist",
+                metadata={"report": report, "analyzed_count": len(low_conf_queries)}
+            )
+            
+            # Clear processed
+            keys_to_delete = [k for k, v in review_queue.items() if v["status"] == "pending_review"]
+            for k in keys_to_delete:
+                del review_queue[k]
+                
+            logger.info("Strategist completed daily analysis and stored report.")
+        except Exception as e:
+            logger.error(f"Strategist Gemini generation failed: {e}")

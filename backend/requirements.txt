@@ -22,3 +22,6 @@ psutil>=5.9.0
 python-multipart>=0.0.6
 websockets>=12.0
 ruff>=0.2.0
+python-docx
+openpyxl
+rank-bm25

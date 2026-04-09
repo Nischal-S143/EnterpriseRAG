@@ -51,7 +51,7 @@ def get_db():
 
 @contextmanager
 def get_db_session():
-    """Context manager for non-FastAPI use (e.g., background tasks)."""
+    """Context manager for standard DB writes (commits on exit)."""
     db = SessionLocal()
     try:
         yield db
@@ -62,10 +62,22 @@ def get_db_session():
     finally:
         db.close()
 
+@contextmanager
+def get_db_read():
+    """Context manager for read-only actions (never commits)."""
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
 
 def init_db():
     """Create all tables. Safe to call multiple times."""
-    from models import User, ChatHistory, SystemLog, AnalyticsEvent  # noqa
+    from models import (  # noqa
+        User, ChatHistory, SystemLog, AnalyticsEvent, Document, RoleAuditLog,
+        Evaluation, AuditLog, ReviewQueue, Feedback, StrategistReport, GoldenAnswer,
+    )
     Base.metadata.create_all(bind=engine)
     logger.info("Database tables created/verified successfully.")
 

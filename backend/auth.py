@@ -19,26 +19,27 @@ load_dotenv()
 logger = logging.getLogger("pagani.auth")
 
 # ── DB Persistence Helpers (additive, non-breaking) ──
-def _persist_user_to_db(username: str, password_hash: str, role: str):
+async def _persist_user_to_db(username: str, password_hash: str, role: str):
     """Persist a registered user to the database (fire-and-forget)."""
-    try:
-        from database import get_db_session
-        from models import User
-        with get_db_session() as db:
-            existing = db.query(User).filter(User.name == username).first()
-            if not existing:
-                db.add(User(name=username, password_hash=password_hash, role=role))
-    except Exception as e:
-        logger.warning(f"DB user persistence failed (non-fatal): {e}")
+    def _write():
+        try:
+            from database import get_db_session
+            from models import User
+            with get_db_session() as db:
+                existing = db.query(User).filter(User.name == username).first()
+                if not existing:
+                    db.add(User(name=username, password_hash=password_hash, role=role))
+        except Exception as e:
+            logger.warning(f"DB user persistence failed (non-fatal): {e}")
+
+    import asyncio
+    await asyncio.to_thread(_write)
 
 
 def _log_auth_event(action: str, username: str, metadata: dict | None = None):
-    """Log an auth event to the database (fire-and-forget)."""
-    try:
-        from logging_config import log_event
-        log_event("pagani.auth", action, user_id=username, metadata=metadata)
-    except Exception as e:
-        logger.warning(f"Auth event logging failed (non-fatal): {e}")
+    """Log an auth event to the database (universally non-blocking)."""
+    from logging_config import log_event
+    log_event("pagani.auth", action, user_id=username, metadata=metadata)
 
 # ── Configuration ──
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "pagani-default-secret")
@@ -61,15 +62,16 @@ users_db: dict[str, dict] = {}
 def _load_users_from_db():
     """Load persisted users from DB into in-memory store on startup."""
     try:
-        from database import get_db_session
+        from database import get_db_read
         from models import User
-        with get_db_session() as db:
+        # Use a read-only session to avoid deadlocks during startup
+        with get_db_read() as db:
             for user in db.query(User).all():
                 if user.name not in users_db:
                     users_db[user.name] = {
                         "password_hash": user.password_hash,
                         "role": user.role,
-                        "created_at": getattr(user, "created_at", datetime.now(timezone.utc).isoformat()),
+                        "created_at": user.created_at.isoformat() if hasattr(user, "created_at") and user.created_at else datetime.now(timezone.utc).isoformat(),
                     }
         if users_db:
             logger.info(f"Loaded {len(users_db)} users from database")
@@ -77,8 +79,8 @@ def _load_users_from_db():
         logger.warning(f"Could not load users from DB (non-fatal): {e}")
 
 
-# Load users on module import
-_load_users_from_db()
+# Load users explicitly via lifespan now, NOT at module level
+# _load_users_from_db()
 
 # ── Valid Roles ──
 VALID_ROLES = {"super_admin", "admin", "engineer", "viewer"}
@@ -86,7 +88,7 @@ VALID_ROLES = {"super_admin", "admin", "engineer", "viewer"}
 # ── Permission Matrix ──
 ROLE_PERMISSIONS: dict[str, list[str]] = {
     "super_admin": ["read", "write", "delete", "execute", "manage_roles", "manage_users"],
-    "admin": ["read", "write", "delete", "execute", "manage_users"],
+    "admin": ["read", "write", "delete", "execute", "manage_users", "manage_roles"],
     "engineer": ["read", "write", "execute"],
     "viewer": ["read"],
 }
@@ -128,6 +130,7 @@ class RefreshRequest(BaseModel):
 
 class ChatRequest(BaseModel):
     question: str = Field(..., min_length=1, max_length=2000)
+    format: Optional[str] = Field(default="Standard")
 
 
 class ChatResponse(BaseModel):
@@ -247,6 +250,20 @@ def verify_refresh_token(token: str) -> dict:
 # FastAPI Dependencies
 # ═══════════════════════════════════════════
 
+from fastapi import Header
+import secrets
+
+ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "pagani-super-secret-admin")
+
+def verify_admin_key(x_admin_key: str = Header(...)):
+    """Validates X-Admin-Key using a timing-attack safe compare."""
+    if not secrets.compare_digest(x_admin_key, ADMIN_API_KEY):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid Admin Key",
+        )
+    return x_admin_key
+
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
 ) -> dict:
@@ -329,7 +346,7 @@ def clear_login_attempts(identifier: str):
 # User Management
 # ═══════════════════════════════════════════
 
-def register_user(user: UserRegister) -> dict:
+async def register_user(user: UserRegister) -> dict:
     """Register a new user. Returns user info."""
     if user.username in users_db:
         raise HTTPException(
@@ -350,8 +367,8 @@ def register_user(user: UserRegister) -> dict:
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
 
-    # Persist to DB (additive)
-    _persist_user_to_db(user.username, hashed, user.role)
+    # Persist to DB (async wrapper)
+    await _persist_user_to_db(user.username, hashed, user.role)
     _log_auth_event("user_register", user.username, {"role": user.role})
 
     logger.info(f"User registered: {user.username} (role: {user.role})")
@@ -387,7 +404,7 @@ async def authenticate_user(user: UserLogin) -> TokenResponse:
     access_token = create_access_token(token_data)
     refresh_token = create_refresh_token(token_data)
 
-    # Log auth event (additive)
+    # Log auth event (now fire-and-forget by default)
     _log_auth_event("login_success", user.username, {"role": db_user["role"]})
 
     # Clear brute-force counter on success
@@ -427,3 +444,52 @@ def refresh_access_token(refresh_token: str) -> TokenResponse:
         role=db_user["role"],
         username=username,
     )
+
+# ═══════════════════════════════════════════
+# Gatekeeper & Review Queue
+# ═══════════════════════════════════════════
+
+# In-Memory Review Queue
+# Structure: { query_id: { username, question, reason, status, timestamp } }
+review_queue: dict[str, dict] = {}
+
+class Gatekeeper:
+    """
+    Acts as a security and quality filter for incoming RAG queries.
+    """
+    def __init__(self, flag_keywords: list[str] = None, confidence_threshold: float = 0.50):
+        self.flag_keywords = flag_keywords or ["confidential", "salary", "ssn", "password", "exploit", "hack", "internal only"]
+        self.confidence_threshold = confidence_threshold
+
+    def check_query(self, question: str, username: str, confidence: float = None) -> dict:
+        """
+        Evaluates a query. If bad, routes to review queue.
+        Returns {"status": "ok"} or {"status": "under_review"}.
+        """
+        import uuid
+        from datetime import datetime, timezone
+        
+        reason = None
+        
+        # 1. Keyword check
+        q_lower = question.lower()
+        if any(kw in q_lower for kw in self.flag_keywords):
+            reason = "Contains restricted keywords"
+            
+        # 2. Confidence check
+        elif confidence is not None and confidence < self.confidence_threshold:
+            reason = "Retrieval/Analytics confidence below threshold"
+            
+        if reason:
+            query_id = str(uuid.uuid4())
+            review_queue[query_id] = {
+                "username": username,
+                "question": question,
+                "reason": reason,
+                "status": "pending_review",
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
+            logger.warning(f"Gatekeeper flagged query from {username}. Reason: {reason}")
+            return {"status": "under_review"}
+            
+        return {"status": "ok"}

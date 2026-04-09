@@ -121,3 +121,4 @@ def get_login_attempts(limit: int = 50) -> list[dict]:
 
 # ── Singleton ──
 audit = AuditLogger()
+Auditor = AuditLogger  # Alias mapping to fulfill specifications
