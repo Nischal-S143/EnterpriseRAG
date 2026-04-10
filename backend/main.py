@@ -882,10 +882,94 @@ async def v1_login_attempts(
 
 
 # ───────────────────────────
-# Document Management Endpoints (Read-Only)
+# Document Management Endpoints
 # ───────────────────────────
 
+@v1_router.get("/documents", summary="List all documents")
+async def v1_list_documents(
+    current_user: dict = Depends(get_current_user),
+):
+    """List all documents in the vector store."""
+    try:
+        docs = vector_store.list_documents() if hasattr(vector_store, "list_documents") else []
+        return {"documents": docs, "total": len(docs)}
+    except Exception as e:
+        logger.warning(f"Failed to list documents: {e}")
+        return {"documents": [], "total": 0}
 
+
+@v1_router.get("/documents/{doc_id}", summary="Get document by ID")
+async def v1_get_document(
+    doc_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Retrieve a single document by its ID."""
+    try:
+        doc = vector_store.get_document(doc_id) if hasattr(vector_store, "get_document") else None
+        if doc is None:
+            raise HTTPException(status_code=404, detail="Document not found")
+        return doc
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning(f"Failed to get document {doc_id}: {e}")
+        raise HTTPException(status_code=404, detail="Document not found")
+
+
+@v1_router.delete("/documents/{doc_id}", summary="Delete a document")
+async def v1_delete_document(
+    doc_id: str,
+    current_user: dict = Depends(require_permission("manage_users")),
+):
+    """Delete a document from the vector store."""
+    try:
+        deleted = vector_store.delete_document(doc_id) if hasattr(vector_store, "delete_document") else False
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Document not found")
+        audit.log("document_deleted", current_user["username"], metadata={"doc_id": doc_id})
+        return {"message": f"Document {doc_id} deleted", "id": doc_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to delete document {doc_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to delete document")
+
+
+@v1_router.post("/documents/upload", summary="Upload a document")
+async def v1_upload_document(
+    request: Request,
+    current_user: dict = Depends(require_permission("manage_users")),
+):
+    """Upload and ingest a document into the vector store."""
+    form = await request.form()
+    file = form.get("file")
+    if file is None:
+        raise HTTPException(status_code=422, detail="No file provided")
+
+    ALLOWED_EXTENSIONS = {".pdf", ".txt", ".md", ".csv", ".json", ".docx"}
+    filename = getattr(file, "filename", "") or ""
+    ext = os.path.splitext(filename)[1].lower()
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type '{ext}'. Allowed: {', '.join(ALLOWED_EXTENSIONS)}",
+        )
+
+    try:
+        content = await file.read()
+        # Delegate to vector store ingestion if available
+        if hasattr(vector_store, "ingest_document"):
+            doc_id = vector_store.ingest_document(filename, content)
+        else:
+            doc_id = filename
+
+        audit.log("document_uploaded", current_user["username"], metadata={
+            "filename": filename, "size_bytes": len(content),
+        })
+        return {"message": "Document uploaded successfully", "id": doc_id, "filename": filename}
+    except Exception as e:
+        logger.error(f"Document upload failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to process uploaded document")
 
 
 
