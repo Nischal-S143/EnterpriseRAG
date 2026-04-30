@@ -35,6 +35,8 @@ export default function LoginPage() {
                     router.push("/dashboard/admin");
                 } else if (data.role === "engineer") {
                     router.push("/dashboard/engineer");
+                } else if (data.role === "viewer") {
+                    router.push("/dashboard/viewer");
                 } else {
                     router.push("/");
                 }

@@ -61,6 +61,15 @@ export function logout(): void {
     localStorage.removeItem("pagani_access_token");
     localStorage.removeItem("pagani_refresh_token");
     localStorage.removeItem("pagani_user");
+
+    // Clear Viewer Dashboard session flag to allow login logging again
+    sessionStorage.removeItem("viewer_logged_in");
+}
+
+export function getUserScopedKey(baseKey: string): string {
+    const user = getStoredUser();
+    const suffix = user?.username ? `_${user.username.replace(/[^a-zA-Z0-9_]/g, '')}` : "";
+    return `${baseKey}${suffix}`;
 }
 
 export function getToken(): string | null {
