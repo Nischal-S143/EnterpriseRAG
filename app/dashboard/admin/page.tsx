@@ -21,25 +21,23 @@ interface ChatResponse {
 }
 
 /* ═══════════════════════════════════════════════════════════════
-   MOCK DATA
+   TYPES FOR LIVE DATA
    ═══════════════════════════════════════════════════════════════ */
 
-const MOCK_USERS = [
-    { username: "h.pagani", role: "admin", status: "active" },
-    { username: "m.rossi", role: "engineer", status: "active" },
-    { username: "l.marchetti", role: "engineer", status: "active" },
-    { username: "g.bianchi", role: "viewer", status: "active" },
-    { username: "a.ferrari", role: "viewer", status: "inactive" },
-    { username: "r.colombo", role: "engineer", status: "active" },
-];
+interface LiveUser {
+    username: string;
+    role: string;
+    created_at: string;
+}
 
-const MOCK_AUDIT: { user: string; role: string; question: string; time: string }[] = [
-    { user: "m.rossi", role: "engineer", question: "What is the torsional rigidity of the monocoque?", time: "14:32" },
-    { user: "g.bianchi", role: "viewer", question: "Top speed of the Zonda R?", time: "14:18" },
-    { user: "l.marchetti", role: "engineer", question: "Öhlins damper specifications?", time: "13:55" },
-    { user: "h.pagani", role: "admin", question: "Current unit market valuation?", time: "13:41" },
-    { user: "r.colombo", role: "engineer", question: "CFD iteration count for rear wing?", time: "12:09" },
-];
+interface LiveAuditEntry {
+    id: string;
+    user: string;
+    role: string;
+    question: string;
+    time: string;
+    timestamp: string | null;
+}
 
 const ASSEMBLY_TIMELINE = [
     { phase: "Design & Prototyping", months: "0–8", pct: 100 },
@@ -130,6 +128,10 @@ export default function AdminDashboard() {
     const [loadingStep, setLoadingStep] = useState<string>("");
     const [isChatOpen, setIsChatOpen] = useState(false);
 
+    // Live data state
+    const [liveUsers, setLiveUsers] = useState<LiveUser[]>([]);
+    const [liveAudit, setLiveAudit] = useState<LiveAuditEntry[]>([]);
+
     /* ── Auth Verification ── */
     useEffect(() => {
         (async () => {
@@ -141,8 +143,24 @@ export default function AdminDashboard() {
                 }
                 setUser(me);
                 setAuthorized(true);
+
+                // Fetch real users
+                try {
+                    const usersData = await apiFetch<{ users: LiveUser[] }>("/api/v1/admin/users");
+                    setLiveUsers(usersData.users || []);
+                } catch (e) {
+                    console.warn("Failed to load users:", e);
+                }
+
+                // Fetch real chat history
+                try {
+                    const chatsData = await apiFetch<{ chats: LiveAuditEntry[] }>("/api/v1/admin/recent-chats?limit=6");
+                    setLiveAudit(chatsData.chats || []);
+                } catch (e) {
+                    console.warn("Failed to load chat history:", e);
+                }
             } catch {
-                logout(); // Clear invalid tokens so they don't get stuck in a loop
+                logout();
                 router.replace("/login");
             } finally {
                 setLoading(false);
@@ -506,11 +524,13 @@ export default function AdminDashboard() {
                                 User Management
                             </h3>
                             <span className="text-[10px] text-gray-500">
-                                {MOCK_USERS.length} registered
+                                {liveUsers.length} registered
                             </span>
                         </div>
                         <div className="space-y-2">
-                            {MOCK_USERS.map((u, i) => {
+                            {liveUsers.length === 0 ? (
+                                <p className="text-xs text-gray-600 italic text-center py-4">No users found</p>
+                            ) : liveUsers.map((u, i) => {
                                 const rc = ROLE_COLORS[u.role] ?? ROLE_COLORS.viewer;
                                 return (
                                     <motion.div
@@ -537,7 +557,7 @@ export default function AdminDashboard() {
                                                     {u.username}
                                                 </p>
                                                 <p className="text-[10px] text-gray-600">
-                                                    {u.status === "active" ? "● Active" : "○ Inactive"}
+                                                    Joined {new Date(u.created_at).toLocaleDateString()}
                                                 </p>
                                             </div>
                                         </div>
@@ -576,14 +596,16 @@ export default function AdminDashboard() {
                             >
                                 RAG Query Audit
                             </h3>
-                            <span className="text-[10px] text-gray-500">Last 5 queries</span>
+                            <span className="text-[10px] text-gray-500">{liveAudit.length > 0 ? `Last ${liveAudit.length} queries` : "No queries yet"}</span>
                         </div>
                         <div className="space-y-2">
-                            {MOCK_AUDIT.map((entry, i) => {
+                            {liveAudit.length === 0 ? (
+                                <p className="text-xs text-gray-600 italic text-center py-4">No chat history yet. Start querying to see activity here.</p>
+                            ) : liveAudit.map((entry, i) => {
                                 const rc = ROLE_COLORS[entry.role] ?? ROLE_COLORS.viewer;
                                 return (
                                     <motion.div
-                                        key={i}
+                                        key={entry.id || i}
                                         initial={{ opacity: 0, y: 8 }}
                                         animate={{ opacity: 1, y: 0 }}
                                         transition={{ delay: 0.7 + i * 0.06, duration: 0.35 }}
@@ -762,18 +784,18 @@ export default function AdminDashboard() {
                                             className="text-[10px] px-2.5 py-1 rounded-full uppercase tracking-wider"
                                             style={{
                                                 background:
-                                                    response.confidence >= 0.7
+                                                    (typeof response.confidence === 'number' ? response.confidence : 0) >= 0.7
                                                         ? "rgba(34,197,94,0.1)"
                                                         : "rgba(234,179,8,0.1)",
                                                 color:
-                                                    response.confidence >= 0.7 ? "#4ade80" : "#facc15",
+                                                    (typeof response.confidence === 'number' ? response.confidence : 0) >= 0.7 ? "#4ade80" : "#facc15",
                                                 border:
-                                                    response.confidence >= 0.7
+                                                    (typeof response.confidence === 'number' ? response.confidence : 0) >= 0.7
                                                         ? "1px solid rgba(34,197,94,0.2)"
                                                         : "1px solid rgba(234,179,8,0.2)",
                                             }}
                                         >
-                                            Confidence: {(response.confidence * 100).toFixed(0)}%
+                                            Confidence: {typeof response.confidence === 'number' && !isNaN(response.confidence) ? (response.confidence * 100).toFixed(0) : "0"}%
                                         </span>
                                         {response.sources.map((src) => (
                                             <span
