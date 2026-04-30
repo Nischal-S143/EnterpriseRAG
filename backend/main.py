@@ -434,7 +434,7 @@ async def chat(
         update_pipeline_node("router", "running")
         t_route = time.time()
         # Route locally (just simulating router decision for standard chat)
-        decision = router_decision.get("decision", "agent_1")
+        _ = router_decision.get("decision", "agent_1")
         update_pipeline_node("router", "done", int((time.time() - t_route) * 1000))
 
         update_pipeline_node("agent_1", "running")
@@ -692,7 +692,7 @@ async def chat_stream(
 
     except Exception as e:
         logger.error(f"Streaming RAG error for user {username}: {e}")
-        log_event("pagani.api", "api_error", user_id=username, metadata={"error": err_msg})
+        log_event("pagani.api", "api_error", user_id=username, metadata={"error": str(e)})
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="The AI service is temporarily unavailable.",

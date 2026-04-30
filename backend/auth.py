@@ -89,7 +89,7 @@ VALID_ROLES = {"super_admin", "admin", "engineer", "viewer"}
 # ── Permission Matrix ──
 ROLE_PERMISSIONS: dict[str, list[str]] = {
     "super_admin": ["read", "write", "delete", "execute", "manage_roles", "manage_users"],
-    "admin": ["read", "write", "delete", "execute", "manage_users", "manage_roles"],
+    "admin": ["read", "write", "delete", "execute", "manage_users"],
     "engineer": ["read", "write", "execute"],
     "viewer": ["read"],
 }
