@@ -59,12 +59,8 @@ export default function PipelinePage() {
 
     const fetchPipelineStatus = useCallback(async () => {
         try {
-            const token = getToken();
-            const apiBase = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-            const headers: Record<string, string> = {};
-            if (token) headers["Authorization"] = `Bearer ${token}`;
-            const res = await fetch(`${apiBase}/api/v1/pipeline/status`, { headers });
-            if (res.ok) setPipelineStatus(await res.json());
+            const res = await apiFetch<Record<string, NodeStatus>>("/api/v1/pipeline/status");
+            setPipelineStatus(res);
         } catch { /* silent */ }
     }, []);
 
@@ -74,17 +70,11 @@ export default function PipelinePage() {
                 const me = await getUser();
                 setUser(me);
 
-                // Try admin-level health endpoint first, fallback to public /api/health
+                // Fetch public health data for the system status
                 let healthData: SystemHealth | null = null;
                 try {
-                    healthData = await apiFetch<SystemHealth>("/api/v1/analytics/system-health");
-                } catch {
-                    try {
-                        const apiBase = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-                        const res = await fetch(`${apiBase}/api/health`);
-                        if (res.ok) healthData = await res.json();
-                    } catch { /* silent */ }
-                }
+                    healthData = await apiFetch<SystemHealth>("/api/health", { skipAuth: true });
+                } catch { /* silent */ }
                 if (healthData) setHealth(healthData);
 
                 try {
@@ -162,7 +152,7 @@ export default function PipelinePage() {
                     </h1>
                     <div className="flex items-center gap-4">
                         <span className="text-xs">{user.username}</span>
-                        <button onClick={() => router.push("/")} className="text-[10px] uppercase text-gray-500 hover:text-white">Home</button>
+                        <button onClick={() => router.push(`/dashboard/${user.role === 'engineer' ? 'engineer' : 'admin'}`)} className="text-[10px] uppercase text-gray-500 hover:text-white">Dashboard</button>
                     </div>
                 </div>
             </header>
