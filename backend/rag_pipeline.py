@@ -9,7 +9,7 @@ import json
 import logging
 import asyncio
 from openai import AsyncOpenAI
-from sentence_transformers import SentenceTransformer
+from vector_store import embed_query
 import numpy as np
 from dotenv import load_dotenv
 
@@ -21,7 +21,6 @@ api_key = os.getenv("GROQ_API_KEY", "dummy_key") # Groq Key
 client = AsyncOpenAI(base_url="https://api.groq.com/openai/v1", api_key=api_key)
 
 GENERATION_MODEL = "llama-3.3-70b-versatile"
-embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
 
 # ── Session Memory Store ──
 # Map of username to a list of dicts: {"role": "user"|"model", "content": str}
@@ -368,7 +367,7 @@ class ToolExecution:
 
     async def _embed_query(self, query: str) -> np.ndarray:
         try:
-            embedding = embedding_model.encode([query], convert_to_numpy=True).astype(np.float32)
+            embedding = await asyncio.to_thread(embed_query, query)
             return embedding
         except Exception as e:
             logger.error(f"Failed to embed query: {e}")

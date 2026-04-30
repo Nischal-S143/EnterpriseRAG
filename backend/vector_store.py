@@ -10,7 +10,7 @@ import logging
 import json
 import numpy as np
 import faiss
-from sentence_transformers import SentenceTransformer
+import google.generativeai as genai
 from openai import OpenAI
 import threading
 try:
@@ -22,11 +22,13 @@ from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 logger = logging.getLogger("pagani.vector_store")
 
-# ── API Configuration ──
-api_key = os.getenv("GROQ_API_KEY", "dummy_key") # Groq Key
+# ── Gemini Embedding Configuration ──
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+EMBEDDING_MODEL = "models/gemini-embedding-001"
+
+# ── Groq Configuration (for LLM reranking) ──
+api_key = os.getenv("GROQ_API_KEY", "dummy_key")
 client = OpenAI(base_url="https://api.groq.com/openai/v1", api_key=api_key, timeout=15.0, max_retries=1)
-EMBEDDING_MODEL = "all-MiniLM-L6-v2"
-embedding_model = SentenceTransformer(EMBEDDING_MODEL)
 
 # ── Persistence Paths ──
 INDEX_PATH = os.path.join(os.path.dirname(__file__), "faiss_index.bin")
@@ -219,22 +221,47 @@ class VectorStore:
             logger.info(f"FAISS index updated: {self.index.ntotal} vectors total")
             
     def _embed_texts(self, texts: list[str]) -> np.ndarray:
-        """Embed a list of texts using local SentenceTransformer."""
-        logger.info(f"Embedding {len(texts)} texts locally...")
-        try:
-            embeddings = embedding_model.encode(texts, convert_to_numpy=True).astype(np.float32)
-            if embeddings.ndim == 1:
-                embeddings = embeddings.reshape(1, -1)
-            logger.info(f"Embedded {len(texts)} total texts, shape: {embeddings.shape}")
-            return embeddings
-        except Exception as e:
-            logger.error(f"Failed to generate embeddings: {e}")
-            raise RuntimeError(f"Failed to generate embeddings: {e}")
+        """Embed a list of texts using Gemini text-embedding-004."""
+        logger.info(f"Embedding {len(texts)} texts via Gemini API sequentially...")
+        import time
+        all_embeddings = []
+        for i, text in enumerate(texts):
+            for attempt in range(5):
+                try:
+                    result = genai.embed_content(
+                        model=EMBEDDING_MODEL,
+                        content=text,
+                        task_type="retrieval_document",
+                    )
+                    batch_emb = np.array(result["embedding"], dtype=np.float32)
+                    if batch_emb.ndim == 1:
+                        batch_emb = batch_emb.reshape(1, -1)
+                    all_embeddings.append(batch_emb)
+                    # Tiny sleep to respect free-tier rate limits
+                    time.sleep(1)
+                    break
+                except Exception as e:
+                    if "429" in str(e) and attempt < 4:
+                        wait = (attempt + 1) * 3
+                        logger.warning(f"Rate limited on doc {i+1}. Retrying in {wait}s...")
+                        time.sleep(wait)
+                    else:
+                        logger.error(f"Embedding generation failed on doc {i+1}: {e}")
+                        raise RuntimeError(f"Failed to generate embeddings: {e}")
+                        
+        embeddings = np.vstack(all_embeddings) if len(all_embeddings) > 1 else all_embeddings[0]
+        logger.info(f"Embedded {len(texts)} total texts, shape: {embeddings.shape}")
+        return embeddings
 
     def _embed_query(self, query: str) -> np.ndarray:
-        """Embed a single query using local SentenceTransformer."""
+        """Embed a single query using Gemini text-embedding-004."""
         try:
-            embedding = embedding_model.encode([query], convert_to_numpy=True).astype(np.float32)
+            result = genai.embed_content(
+                model=EMBEDDING_MODEL,
+                content=query,
+                task_type="retrieval_query",
+            )
+            embedding = np.array(result["embedding"], dtype=np.float32).reshape(1, -1)
             return embedding
         except Exception as e:
             logger.error(f"Query embedding failed: {e}")
@@ -623,6 +650,130 @@ class VectorStore:
         })
 
         return {"results": final_results, "debug": debug_info, "_t_start": t_start}
+
+    # ── Source-to-PDF mapping ──
+    _SOURCE_PDF_MAP = {
+        "Pagani Heritage Archives": "pagani_intelligence_brand_history.pdf",
+        "Engine Technical Specification Sheet": "pagani_intelligence_amg_v12_powertrain.pdf",
+        "Chassis Engineering Report": "pagani_intelligence_zonda_engineering.pdf",
+        "Aerodynamics R&D Report": "pagani_intelligence_aerodynamics.pdf",
+        "Performance Test Results": "pagani_intelligence_vehicle_testing.pdf",
+        "Brake System Technical Manual": "pagani_intelligence_brake_engineering.pdf",
+        "Suspension Engineering Documentation": "pagani_intelligence_suspension_systems.pdf",
+        "Production Registry": "pagani_intelligence_manufacturing_process.pdf",
+        "Interior Design Specifications": "pagani_intelligence_interior_craftsmanship.pdf",
+        "Financial & Ownership Report": "pagani_intelligence_collector_value.pdf",
+        "Tire & Wheel Technical Sheet": "pagani_intelligence_transmission_systems.pdf",
+        "Exhaust System Engineering Report": "pagani_intelligence_cooling_systems.pdf",
+    }
+
+    def _extract_pdf_text(self, pdf_path: str) -> str:
+        """Extract full text from a PDF file using pymupdf."""
+        try:
+            import fitz  # pymupdf
+            doc = fitz.open(pdf_path)
+            pages = []
+            for page in doc:
+                pages.append(page.get_text())
+            doc.close()
+            return "\n\n".join(pages).strip()
+        except Exception as e:
+            logger.warning(f"pymupdf extraction failed for {pdf_path}: {e}")
+            # Fallback to pypdf
+            try:
+                from pypdf import PdfReader
+                reader = PdfReader(pdf_path)
+                pages = []
+                for page in reader.pages:
+                    text = page.extract_text()
+                    if text:
+                        pages.append(text)
+                return "\n\n".join(pages).strip()
+            except Exception as e2:
+                logger.error(f"All PDF extraction failed for {pdf_path}: {e2}")
+                return ""
+
+    def _find_pdf_path(self, source_name: str) -> str | None:
+        """Find the PDF file path for a given document source name."""
+        pdf_dir = os.path.join(os.path.dirname(__file__), "..", "pagani_intelligence_rich_dataset_25_pdfs")
+        if not os.path.exists(pdf_dir):
+            return None
+
+        # 1. Check explicit mapping
+        mapped = self._SOURCE_PDF_MAP.get(source_name)
+        if mapped:
+            path = os.path.join(pdf_dir, mapped)
+            if os.path.exists(path):
+                return path
+
+        # 2. Fuzzy match by keyword overlap
+        source_lower = source_name.lower().replace(" ", "_").replace("&", "and")
+        source_words = set(re.findall(r'\w+', source_lower))
+
+        for fname in os.listdir(pdf_dir):
+            if not fname.endswith(".pdf"):
+                continue
+            fname_lower = fname.lower().replace("pagani_intelligence_", "").replace(".pdf", "")
+            fname_words = set(fname_lower.split("_"))
+            overlap = source_words & fname_words
+            if len(overlap) >= 2:
+                return os.path.join(pdf_dir, fname)
+
+        return None
+
+    def get_document(self, doc_id: str) -> dict | None:
+        """Retrieve a full document: extracts full text from the original PDF if available."""
+        if not self._initialized:
+            self.initialize()
+
+        # Step 1: Find the source name for this doc_id
+        target_source = None
+        for i, doc in enumerate(self.documents):
+            if doc.get("doc_id") == doc_id or doc.get("source") == doc_id or str(i) == doc_id:
+                target_source = doc.get("source", doc_id)
+                break
+
+        if target_source is None:
+            return None
+
+        # Step 2: Try to find and extract the original PDF
+        pdf_path = self._find_pdf_path(target_source)
+        pdf_filename = os.path.basename(pdf_path) if pdf_path else None
+
+        if pdf_path:
+            full_content = self._extract_pdf_text(pdf_path)
+            file_size = os.path.getsize(pdf_path)
+        else:
+            # Fallback: aggregate all chunks with this source
+            chunk_texts = []
+            for doc in self.documents:
+                if doc.get("source") == target_source:
+                    chunk_texts.append(doc.get("content", ""))
+            full_content = "\n\n".join(chunk_texts)
+            file_size = len(full_content)
+
+        return {
+            "id": doc_id,
+            "filename": target_source,
+            "type": "PDF" if pdf_path else "SPEC",
+            "content": full_content,
+            "file_size": file_size,
+            "upload_date": "2026-04-01T10:00:00Z",
+            "pdf_filename": pdf_filename,
+        }
+
+def embed_query(query: str) -> np.ndarray:
+    """Standalone query embedding using Gemini (for use by other modules)."""
+    try:
+        result = genai.embed_content(
+            model=EMBEDDING_MODEL,
+            content=query,
+            task_type="retrieval_query",
+        )
+        return np.array(result["embedding"], dtype=np.float32).reshape(1, -1)
+    except Exception as e:
+        logger.error(f"Query embedding failed: {e}")
+        return None
 
 
 # Singleton instance
