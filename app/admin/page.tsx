@@ -21,6 +21,17 @@ interface UserObj {
     created_at: string;
 }
 
+interface ReviewItem {
+    id: string;
+    username: string;
+    question: string;
+    reason: string;
+    status: string;
+    created_at: string;
+}
+
+const ADMIN_KEY = "pagani-super-secret-admin";
+
 export default function AdminPage() {
     const router = useRouter();
     const [user, setUser] = useState<UserInfo | null>(null);
@@ -28,10 +39,20 @@ export default function AdminPage() {
     const [adminKey, setAdminKey] = useState("");
     const [gatePassed, setGatePassed] = useState(false);
     const [activeTab, setActiveTab] = useState("Roles");
-    const TABS = ["Roles", "Review Queue", "Stress Test", "Reports", "Audit Logs"];
+    const TABS = ["Roles", "Review Queue", "Reports", "Audit Logs"];
 
     const [users, setUsers] = useState<UserObj[]>([]);
     const [rolesAudit, setRolesAudit] = useState<any[]>([]);
+
+    const [reviewItems, setReviewItems] = useState<ReviewItem[]>([]);
+    const [editingItemId, setEditingItemId] = useState<string | null>(null);
+    const [editResponseText, setEditResponseText] = useState("");
+
+    const [auditLogs, setAuditLogs] = useState<any[]>([]);
+    const [reports, setReports] = useState<any[]>([]);
+    const [isGeneratingReport, setIsGeneratingReport] = useState(false);
+
+
 
     useEffect(() => {
         (async () => {
@@ -84,6 +105,88 @@ export default function AdminPage() {
         }
     };
 
+    useEffect(() => {
+        if (activeTab === "Review Queue" && gatePassed) {
+            (async () => {
+                try {
+                    const data = await apiFetch<{ review_queue: ReviewItem[] }>("/api/v1/admin/review-queue", {
+                        headers: { "X-Admin-Key": ADMIN_KEY }
+                    });
+                    setReviewItems(data.review_queue || []);
+                } catch (err: any) {
+                    console.error("Failed to fetch review queue:", err);
+                }
+            })();
+        } else if (activeTab === "Reports" && gatePassed) {
+            (async () => {
+                try {
+                    const data = await apiFetch<{ reports: any[] }>("/api/v1/admin/strategist-reports", {
+                        headers: { "X-Admin-Key": ADMIN_KEY }
+                    });
+                    setReports(data.reports || []);
+                } catch (err: any) {
+                    console.error("Failed to fetch reports:", err);
+                }
+            })();
+        } else if (activeTab === "Audit Logs" && gatePassed) {
+            (async () => {
+                try {
+                    const data = await apiFetch<{ logs: any[] }>("/api/v1/admin/audit-log", {
+                        headers: { "X-Admin-Key": ADMIN_KEY }
+                    });
+                    setAuditLogs(data.logs || []);
+                } catch (err: any) {
+                    console.error("Failed to fetch audit logs:", err);
+                }
+            })();
+        }
+    }, [activeTab, gatePassed]);
+
+    const handleAuth = (e: React.FormEvent) => {
+        e.preventDefault();
+        if (!adminKey) return;
+        setGatePassed(true);
+    };
+
+    const handleReviewAction = async (itemId: string, action: string, editedResponse?: string) => {
+        try {
+            await apiFetch(`/api/v1/admin/review/${itemId}`, {
+                method: "PATCH",
+                headers: { "X-Admin-Key": ADMIN_KEY },
+                body: JSON.stringify({ action, edited_response: editedResponse })
+            });
+            setReviewItems(prev => prev.filter(item => item.id !== itemId));
+            setEditingItemId(null);
+            setEditResponseText("");
+        } catch (err) {
+            console.error("Failed to process review action:", err);
+            alert("Action failed. Check console.");
+        }
+    };
+
+    const handleGenerateReport = async () => {
+        setIsGeneratingReport(true);
+        try {
+            await apiFetch("/api/v1/admin/strategist/trigger", {
+                method: "POST",
+                headers: { "X-Admin-Key": ADMIN_KEY }
+            });
+            // Fetch reports again
+            const data = await apiFetch<{ reports: any[] }>("/api/v1/admin/strategist-reports", {
+                headers: { "X-Admin-Key": ADMIN_KEY }
+            });
+            setReports(data.reports || []);
+            alert("Report generated successfully!");
+        } catch (err: any) {
+            console.log("Strategist trigger returned an expected error:", err.message);
+            alert(err.message || "Failed to generate report. Make sure there are pending reviews in the queue.");
+        } finally {
+            setIsGeneratingReport(false);
+        }
+    };
+
+
+
     if (loading) {
         return (
             <div className="min-h-screen bg-[#0A0A0A] flex items-center justify-center">
@@ -127,7 +230,7 @@ export default function AdminPage() {
                             <div className="w-12 h-12 mx-auto mb-4 bg-pagani-gold/20 flex items-center justify-center rounded-full text-pagani-gold text-2xl">🔒</div>
                             <h2 className="text-xl font-bold font-[var(--font-orbitron)] text-white mb-2">Admin Terminal</h2>
                             <p className="text-xs text-gray-500 uppercase tracking-widest mb-6">Enter X-Admin-Key to proceed</p>
-                            <form onSubmit={(e) => { e.preventDefault(); if (adminKey) setGatePassed(true); }} className="flex gap-2 justify-center">
+                            <form onSubmit={handleAuth} className="flex gap-2 justify-center">
                                 <input type="password" value={adminKey} onChange={e => setAdminKey(e.target.value)} className="bg-black border border-white/20 rounded px-4 py-2 text-sm text-white outline-none focus:border-pagani-gold w-full" placeholder="Secure Key..." />
                                 <button type="submit" className="bg-pagani-gold text-black uppercase tracking-widest text-[10px] font-bold px-4 rounded hover:bg-[#b0902c] transition-colors">Auth</button>
                             </form>
@@ -216,11 +319,183 @@ export default function AdminPage() {
                             </>
                         )}
 
-                        {activeTab !== "Roles" && (
-                            <motion.div variants={fadeUp} initial="hidden" animate="visible" className="bg-[#111] border border-white/10 rounded-xl p-12 text-center">
-                                <span className="text-4xl block mb-4">🚧</span>
-                                <h3 className="text-lg font-bold font-[var(--font-orbitron)] text-pagani-gold mb-2 uppercase">{activeTab} Module </h3>
-                                <p className="text-xs text-gray-500 uppercase tracking-widest max-w-sm mx-auto">This diagnostic and management module is currently under development.</p>
+                        {activeTab === "Review Queue" && (
+                            <motion.div variants={fadeUp} initial="hidden" animate="visible" className="space-y-6">
+                                <h2 className="text-2xl font-bold font-[var(--font-orbitron)] text-pagani-gold">Review Queue</h2>
+                                <p className="text-xs text-gray-500 uppercase tracking-widest">Gatekeeper Flagged Queries</p>
+                                
+                                {reviewItems.length === 0 ? (
+                                    <div className="bg-[#111] border border-white/10 rounded-xl p-12 text-center">
+                                        <span className="text-4xl block mb-4">✅</span>
+                                        <h3 className="text-lg font-bold text-white uppercase tracking-widest">All Clear</h3>
+                                        <p className="text-xs text-gray-500 mt-2">No queries currently awaiting review.</p>
+                                    </div>
+                                ) : (
+                                    <div className="grid grid-cols-1 gap-4">
+                                        {reviewItems.map(item => (
+                                            <div key={item.id} className="bg-[#111] border border-white/10 rounded-xl p-6 shadow-2xl relative overflow-hidden">
+                                                <div className="absolute top-0 left-0 w-1 h-full bg-pagani-gold" />
+                                                <div className="flex justify-between items-start mb-4">
+                                                    <div>
+                                                        <div className="text-xs text-pagani-gold font-bold uppercase tracking-wider">User: {item.username}</div>
+                                                        <div className="text-[10px] text-gray-500">{new Date(item.created_at).toLocaleString()}</div>
+                                                    </div>
+                                                    <div className="bg-red-500/20 text-red-400 border border-red-500/30 px-3 py-1 rounded text-[10px] uppercase font-bold">
+                                                        {item.reason}
+                                                    </div>
+                                                </div>
+                                                <div className="bg-black/50 p-4 rounded-lg border border-white/5 mb-4">
+                                                    <p className="text-sm text-gray-300">"{item.question}"</p>
+                                                </div>
+                                                
+                                                {editingItemId === item.id ? (
+                                                    <div className="mb-4 space-y-2">
+                                                        <textarea 
+                                                            className="w-full bg-black border border-pagani-gold/50 rounded p-3 text-sm text-white outline-none focus:border-pagani-gold h-24"
+                                                            placeholder="Enter edited response..."
+                                                            value={editResponseText}
+                                                            onChange={e => setEditResponseText(e.target.value)}
+                                                        />
+                                                        <div className="flex gap-2">
+                                                            <button 
+                                                                onClick={() => handleReviewAction(item.id, "edit", editResponseText)}
+                                                                className="bg-pagani-gold text-black px-4 py-2 rounded text-xs font-bold uppercase tracking-wider hover:bg-[#b0902c] transition-colors"
+                                                            >
+                                                                Submit Edit
+                                                            </button>
+                                                            <button 
+                                                                onClick={() => setEditingItemId(null)}
+                                                                className="bg-transparent border border-white/20 text-white px-4 py-2 rounded text-xs font-bold uppercase tracking-wider hover:bg-white/10 transition-colors"
+                                                            >
+                                                                Cancel
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                ) : (
+                                                    <div className="flex flex-wrap gap-3">
+                                                        <button 
+                                                            onClick={() => handleReviewAction(item.id, "approve")}
+                                                            className="bg-green-500/20 text-green-400 hover:bg-green-500 hover:text-white border border-green-500/50 px-4 py-2 rounded text-xs font-bold uppercase tracking-wider transition-colors"
+                                                        >
+                                                            Approve
+                                                        </button>
+                                                        <button 
+                                                            onClick={() => handleReviewAction(item.id, "reject")}
+                                                            className="bg-red-500/20 text-red-400 hover:bg-red-500 hover:text-white border border-red-500/50 px-4 py-2 rounded text-xs font-bold uppercase tracking-wider transition-colors"
+                                                        >
+                                                            Reject
+                                                        </button>
+                                                        <button 
+                                                            onClick={() => { setEditingItemId(item.id); setEditResponseText(""); }}
+                                                            className="bg-pagani-gold/20 text-pagani-gold hover:bg-pagani-gold hover:text-black border border-pagani-gold/50 px-4 py-2 rounded text-xs font-bold uppercase tracking-wider transition-colors"
+                                                        >
+                                                            Edit & Approve
+                                                        </button>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                            </motion.div>
+                        )}
+
+
+
+                        {activeTab === "Reports" && (
+                            <motion.div variants={fadeUp} initial="hidden" animate="visible" className="space-y-6">
+                                <div className="flex justify-between items-start">
+                                    <div>
+                                        <h2 className="text-2xl font-bold font-[var(--font-orbitron)] text-pagani-gold">Strategist Reports</h2>
+                                        <p className="text-xs text-gray-500 uppercase tracking-widest">Nightly AI Analysis Reports</p>
+                                    </div>
+                                    <button 
+                                        onClick={handleGenerateReport}
+                                        disabled={isGeneratingReport}
+                                        className="bg-pagani-gold text-black px-4 py-2 rounded text-xs font-bold uppercase tracking-wider hover:bg-[#b0902c] transition-colors disabled:opacity-50 flex items-center gap-2"
+                                    >
+                                        {isGeneratingReport ? (
+                                            <>
+                                                <motion.div animate={{ rotate: 360 }} transition={{ repeat: Infinity, duration: 1, ease: "linear" }} className="w-3 h-3 border border-black border-t-transparent rounded-full" />
+                                                Generating...
+                                            </>
+                                        ) : "Generate Report Now"}
+                                    </button>
+                                </div>
+                                
+                                {reports.length === 0 ? (
+                                    <div className="bg-[#111] border border-white/10 rounded-xl p-12 text-center">
+                                        <p className="text-xs text-gray-500 mt-2 uppercase tracking-widest">No reports generated yet.</p>
+                                    </div>
+                                ) : (
+                                    <div className="grid grid-cols-1 gap-4">
+                                        {reports.map(report => (
+                                            <div key={report.id} className="bg-[#111] border border-white/10 rounded-xl p-6 shadow-2xl relative overflow-hidden">
+                                                <div className="flex justify-between items-start mb-4 border-b border-white/10 pb-4">
+                                                    <div>
+                                                        <div className="text-xs text-white font-bold uppercase tracking-wider mb-1">Report ID: {report.id}</div>
+                                                        <div className="text-[10px] text-gray-500">
+                                                            {report.created_at ? new Date(report.created_at).toLocaleString() : "Unknown"} 
+                                                            {report.period_start && ` | Period: ${new Date(report.period_start).toLocaleDateString()} - ${new Date(report.period_end).toLocaleDateString()}`}
+                                                        </div>
+                                                    </div>
+                                                    <div className="bg-pagani-gold/20 text-pagani-gold px-3 py-1 rounded text-[10px] uppercase font-bold">
+                                                        Analyzed: {report.queries_analyzed} queries
+                                                    </div>
+                                                </div>
+                                                <div className="text-sm text-gray-300 whitespace-pre-wrap font-mono bg-black/50 p-4 rounded-lg border border-white/5">
+                                                    {report.report_text}
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                            </motion.div>
+                        )}
+
+                        {activeTab === "Audit Logs" && (
+                            <motion.div variants={fadeUp} initial="hidden" animate="visible" className="space-y-6">
+                                <h2 className="text-2xl font-bold font-[var(--font-orbitron)] text-pagani-gold">System Audit Logs</h2>
+                                <p className="text-xs text-gray-500 uppercase tracking-widest">Global Activity Tracking</p>
+                                
+                                <div className="bg-[#111] border border-white/10 rounded-xl p-6 shadow-2xl overflow-hidden">
+                                    <div className="overflow-x-auto max-h-[600px] overflow-y-auto hidden-scrollbar">
+                                        {auditLogs.length === 0 ? (
+                                            <p className="text-center text-xs text-gray-500 py-10 uppercase tracking-widest">No logs found.</p>
+                                        ) : (
+                                            <table className="w-full text-left border-collapse">
+                                                <thead className="sticky top-0 bg-[#111] z-10 border-b border-white/10">
+                                                    <tr>
+                                                        <th className="p-3 text-[10px] text-pagani-gold uppercase tracking-wider font-bold">Time</th>
+                                                        <th className="p-3 text-[10px] text-pagani-gold uppercase tracking-wider font-bold">Action</th>
+                                                        <th className="p-3 text-[10px] text-pagani-gold uppercase tracking-wider font-bold">User</th>
+                                                        <th className="p-3 text-[10px] text-pagani-gold uppercase tracking-wider font-bold">Metadata</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    {auditLogs.map((log, i) => (
+                                                        <tr key={i} className="border-b border-white/5 hover:bg-white/5 transition-colors">
+                                                            <td className="p-3 text-[10px] text-gray-400 whitespace-nowrap">
+                                                                {log.timestamp ? new Date(log.timestamp).toLocaleString() : "—"}
+                                                            </td>
+                                                            <td className="p-3">
+                                                                <span className="bg-white/10 text-white px-2 py-1 rounded text-[10px] uppercase font-bold">
+                                                                    {log.action}
+                                                                </span>
+                                                            </td>
+                                                            <td className="p-3 text-xs text-gray-300">
+                                                                {log.user_id || "System"}
+                                                            </td>
+                                                            <td className="p-3 text-[10px] text-gray-500 max-w-xs truncate" title={log.metadata ? JSON.stringify(log.metadata) : ""}>
+                                                                {log.metadata ? JSON.stringify(log.metadata) : "—"}
+                                                            </td>
+                                                        </tr>
+                                                    ))}
+                                                </tbody>
+                                            </table>
+                                        )}
+                                    </div>
+                                </div>
                             </motion.div>
                         )}
                     </div>

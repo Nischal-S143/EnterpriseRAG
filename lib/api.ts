@@ -6,7 +6,9 @@
 // NOTE: For production, httpOnly cookies are more secure than localStorage.
 // This implementation uses localStorage for demo simplicity.
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const isServer = typeof window === "undefined";
+const defaultUrl = isServer ? "http://127.0.0.1:8000" : "";
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || defaultUrl;
 
 // ── Input Sanitization ──
 
@@ -77,7 +79,8 @@ export async function apiFetch<T = unknown>(
         const errorBody = await response.json().catch(() => ({
             detail: "Request failed",
         }));
-        throw new ApiError(errorBody.detail || "Request failed", response.status);
+        const errorMessage = errorBody.message || errorBody.detail || "Request failed";
+        throw new ApiError(errorMessage, response.status);
     }
 
     return response.json();
