@@ -4,6 +4,7 @@ import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { motion, type Variants } from "framer-motion";
 import { getUser, getToken, type UserInfo } from "@/lib/auth";
+import { apiFetch } from "@/lib/api";
 import { getScoreColor } from "@/lib/constants";
 
 const fadeUp: Variants = {
@@ -73,19 +74,20 @@ export default function EvaluationsPage() {
                 const me = await getUser();
                 setUser(me);
                 const token = getToken();
-                const apiBase = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-                const headers: Record<string, string> = {};
-                if (token) headers["Authorization"] = `Bearer ${token}`;
-
                 // Fetch summary (public)
-                const sumRes = await fetch(`${apiBase}/api/v1/evaluations/summary`);
-                if (sumRes.ok) setSummary(await sumRes.json());
+                try {
+                    const sumData = await apiFetch<EvalSummary>("/api/v1/evaluations/summary", { skipAuth: true });
+                    setSummary(sumData);
+                } catch (e) {
+                    console.warn("Failed to fetch summary:", e);
+                }
 
                 // Fetch recent (JWT auth)
-                const recRes = await fetch(`${apiBase}/api/v1/evaluations/recent?limit=${limit}`, { headers });
-                if (recRes.ok) {
-                    const data = await recRes.json();
-                    setRecent(data.evaluations || []);
+                try {
+                    const recData = await apiFetch<{ evaluations: EvalRecord[] }>(`/api/v1/evaluations/recent?limit=${limit}`);
+                    setRecent(recData.evaluations || []);
+                } catch (e) {
+                    console.warn("Failed to fetch recent evaluations:", e);
                 }
             } catch (err) {
                 console.error("Failed to load evaluations:", err);
@@ -132,7 +134,7 @@ export default function EvaluationsPage() {
                     </h1>
                     <div className="flex items-center gap-4">
                         <span className="text-xs">{user.username}</span>
-                        <button onClick={() => router.push("/")} className="text-[10px] uppercase text-gray-500 hover:text-white">Home</button>
+                        <button onClick={() => router.push(`/dashboard/${user.role === 'engineer' ? 'engineer' : 'admin'}`)} className="text-[10px] uppercase text-gray-500 hover:text-white">Dashboard</button>
                     </div>
                 </div>
             </header>
@@ -222,11 +224,11 @@ export default function EvaluationsPage() {
                                     {recent.map((r) => (
                                         <tr key={r.id} className="border-b border-white/5 hover:bg-white/5 transition-colors">
                                             <td className="py-2 px-2 text-white/40">{r.created_at ? new Date(r.created_at).toLocaleTimeString() : "—"}</td>
-                                            <td className={`py-2 px-2 text-center ${getScoreColor(r.faithfulness)}`}>{(r.faithfulness * 100).toFixed(0)}%</td>
-                                            <td className={`py-2 px-2 text-center ${getScoreColor(r.relevance)}`}>{(r.relevance * 100).toFixed(0)}%</td>
-                                            <td className={`py-2 px-2 text-center ${getScoreColor(r.completeness)}`}>{(r.completeness * 100).toFixed(0)}%</td>
-                                            <td className={`py-2 px-2 text-center ${getScoreColor(r.f1_score)}`}>{(r.f1_score * 100).toFixed(0)}%</td>
-                                            <td className={`py-2 px-2 text-center ${getScoreColor(r.confidence_score)}`}>{(r.confidence_score * 100).toFixed(0)}%</td>
+                                            <td className={`py-2 px-2 text-center ${getScoreColor(typeof r.faithfulness === 'number' ? r.faithfulness : 0)}`}>{(typeof r.faithfulness === 'number' && !isNaN(r.faithfulness) ? r.faithfulness * 100 : 0).toFixed(0)}%</td>
+                                            <td className={`py-2 px-2 text-center ${getScoreColor(typeof r.relevance === 'number' ? r.relevance : 0)}`}>{(typeof r.relevance === 'number' && !isNaN(r.relevance) ? r.relevance * 100 : 0).toFixed(0)}%</td>
+                                            <td className={`py-2 px-2 text-center ${getScoreColor(typeof r.completeness === 'number' ? r.completeness : 0)}`}>{(typeof r.completeness === 'number' && !isNaN(r.completeness) ? r.completeness * 100 : 0).toFixed(0)}%</td>
+                                            <td className={`py-2 px-2 text-center ${getScoreColor(typeof r.f1_score === 'number' ? r.f1_score : 0)}`}>{(typeof r.f1_score === 'number' && !isNaN(r.f1_score) ? r.f1_score * 100 : 0).toFixed(0)}%</td>
+                                            <td className={`py-2 px-2 text-center ${getScoreColor(typeof r.confidence_score === 'number' ? r.confidence_score : 0)}`}>{(typeof r.confidence_score === 'number' && !isNaN(r.confidence_score) ? r.confidence_score * 100 : 0).toFixed(0)}%</td>
                                             <td className="py-2 px-2 text-right text-white/60">{r.latency_ms?.toFixed(0)}ms</td>
                                             <td className="py-2 px-2 text-right text-green-400">${r.estimated_cost_usd?.toFixed(5)}</td>
                                         </tr>
