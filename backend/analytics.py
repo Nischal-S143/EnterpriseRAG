@@ -287,15 +287,19 @@ class Strategist:
             await asyncio.sleep(24 * 60 * 60) # 24 hours
 
     def analyze_low_confidence_queries(self):
-        from auth import review_queue
+        from database import get_db_session
+        from models import ReviewQueue as RQ, StrategistReport
         
-        low_conf_queries = [v["question"] for v in review_queue.values() if v["status"] == "pending_review"]
+        low_conf_queries = []
+        with get_db_session() as db:
+            pending = db.query(RQ).filter(RQ.status == "pending_review").all()
+            low_conf_queries = [p.question for p in pending]
         
         if not low_conf_queries:
             logger.info("Strategist: No low confidence queries to analyze.")
-            return
+            return "no_queries"
 
-        prompt = f"Analyze these low-confidence or flagged user queries and suggest improvements to the knowledge base or retrieval strategy:\\n\\n{json.dumps(low_conf_queries, indent=2)}\\n\\nProvide a structured report."
+        prompt = f"Analyze these low-confidence or flagged user queries and suggest improvements to the knowledge base or retrieval strategy:\n\n{json.dumps(low_conf_queries, indent=2)}\n\nProvide a structured report."
         
         try:
             response = client.chat.completions.create(
@@ -304,18 +308,33 @@ class Strategist:
             )
             report = response.choices[0].message.content
             
-            # Store report in database
+            with get_db_session() as db:
+                # Store report in database
+                db.add(StrategistReport(
+                    report=report,
+                    analyzed_count=len(low_conf_queries)
+                ))
+                
+                # Clear processed
+                pending_to_clear = db.query(RQ).filter(RQ.status == "pending_review").all()
+                for p in pending_to_clear:
+                    p.status = "analyzed"
+            
+            # Also log to audit for system trail
             Auditor.log(
                 action="strategist_daily_report",
                 user_id="system_strategist",
-                metadata={"report": report, "analyzed_count": len(low_conf_queries)}
+                metadata={"analyzed_count": len(low_conf_queries)}
             )
             
-            # Clear processed
+            # Clear in-memory as fallback
+            from auth import review_queue
             keys_to_delete = [k for k, v in review_queue.items() if v["status"] == "pending_review"]
             for k in keys_to_delete:
                 del review_queue[k]
                 
             logger.info("Strategist completed daily analysis and stored report.")
+            return "success"
         except Exception as e:
             logger.error(f"Strategist Gemini generation failed: {e}")
+            raise RuntimeError(f"Report generation failed: {e}")
