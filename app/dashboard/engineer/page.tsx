@@ -672,7 +672,7 @@ export default function EngineerDashboard() {
                                                 </p>
                                                 {entry.confidence !== undefined && (
                                                     <p className="text-gray-600 mt-1 text-[10px]">
-                                                        Confidence: {(entry.confidence * 100).toFixed(0)}%
+                                                        Confidence: {typeof entry.confidence === 'number' && !isNaN(entry.confidence) ? (entry.confidence * 100).toFixed(0) : "0"}%
                                                         {entry.sources && entry.sources.length > 0
                                                             ? ` · Sources: ${entry.sources.join(", ")}`
                                                             : ""}
