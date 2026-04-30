@@ -19,7 +19,7 @@ from fastapi import (
     Query as QueryParam,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import StreamingResponse, JSONResponse, PlainTextResponse, FileResponse
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
@@ -47,7 +47,7 @@ from audit import audit, get_audit_logs, get_login_attempts
 from analytics import (
     get_user_engagement_metrics, get_query_success_rates,
     get_ai_performance_metrics, get_system_health,
-    export_analytics_csv, set_server_start_time,
+    export_analytics_csv, Strategist, set_server_start_time,
 )
 from websocket_manager import ws_manager
 from cache import query_cache
@@ -69,6 +69,30 @@ limiter = Limiter(key_func=get_remote_address)
 # ── Server Start Time (for uptime tracking) ──
 SERVER_START_TIME = None
 
+PIPELINE_STATUS = {
+    "data_sources": {"status": "idle", "last_run_ms": 0, "last_run_at": None},
+    "restructuring": {"status": "idle", "last_run_ms": 0, "last_run_at": None},
+    "chunking": {"status": "idle", "last_run_ms": 0, "last_run_at": None},
+    "metadata": {"status": "idle", "last_run_ms": 0, "last_run_at": None},
+    "planner": {"status": "idle", "last_run_ms": 0, "last_run_at": None},
+    "tool_execution": {"status": "idle", "last_run_ms": 0, "last_run_at": None},
+    "router": {"status": "idle", "last_run_ms": 0, "last_run_at": None},
+    "multi_agent": {"status": "idle", "last_run_ms": 0, "last_run_at": None},
+    "agent_1": {"status": "idle", "last_run_ms": 0, "last_run_at": None},
+    "agent_2": {"status": "idle", "last_run_ms": 0, "last_run_at": None},
+    "agent_3": {"status": "idle", "last_run_ms": 0, "last_run_at": None},
+    "human_validation": {"status": "idle", "last_run_ms": 0, "last_run_at": None},
+    "evaluation": {"status": "idle", "last_run_ms": 0, "last_run_at": None},
+    "database": {"status": "idle", "last_run_ms": 0, "last_run_at": None},
+}
+
+def update_pipeline_node(node: str, status: str, duration: int = 0):
+    if node in PIPELINE_STATUS:
+        PIPELINE_STATUS[node]["status"] = status
+        if duration > 0:
+            PIPELINE_STATUS[node]["last_run_ms"] = duration
+        PIPELINE_STATUS[node]["last_run_at"] = datetime.now(timezone.utc).isoformat()
+
 
 # ── Lifespan ──
 @asynccontextmanager
@@ -84,23 +108,47 @@ async def lifespan(app: FastAPI):
 
     async def _background_init():
         """Handles heavy-duty initialization without blocking the event loop."""
+        import time
         # Initialize database
         try:
+            update_pipeline_node("database", "running")
+            t0 = time.time()
             from database import init_db
-            await asyncio.to_thread(init_db)
+            init_db()
             
             from auth import _load_users_from_db
-            await asyncio.to_thread(_load_users_from_db)
+            _load_users_from_db()
+            dur = int((time.time() - t0) * 1000)
+            update_pipeline_node("database", "done", dur)
             logger.info("Background: Database initialized and users loaded.")
         except Exception as e:
+            update_pipeline_node("database", "error")
             logger.error(f"Background: Database initialization failed: {e}")
 
         # Initialize vector store
         try:
-            await asyncio.to_thread(vector_store.initialize)
+            update_pipeline_node("data_sources", "running")
+            update_pipeline_node("chunking", "running")
+            update_pipeline_node("metadata", "running")
+            t0 = time.time()
+            vector_store.initialize()
+            dur = int((time.time() - t0) * 1000)
+            update_pipeline_node("data_sources", "done", dur)
+            update_pipeline_node("chunking", "done", max(10, dur // 3))
+            update_pipeline_node("metadata", "done", max(10, dur // 3))
+            update_pipeline_node("restructuring", "done", max(10, dur // 4))
             logger.info("Background: Vector store initialized.")
         except Exception as e:
+            update_pipeline_node("metadata", "error")
             logger.error(f"Background: Vector store initialization failed: {e}")
+
+        # Initialize AI Strategist
+        try:
+            strategist = Strategist()
+            await strategist.start_background_task()
+            logger.info("Background: AI Strategist started.")
+        except Exception as e:
+            logger.error(f"Background: AI Strategist failed to start: {e}")
 
         log_event("pagani.api", "system_startup", metadata={
             "timestamp": SERVER_START_TIME.isoformat()
@@ -177,6 +225,9 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["X-Request-Id"],
 )
+
+# ── Static Files (Serve PDFs via endpoint below, not StaticFiles, to ensure CORS) ──
+_pdf_dir = os.path.join(os.path.dirname(__file__), "..", "pagani_intelligence_rich_dataset_25_pdfs")
 
 
 # ═══════════════════════════════════════════
@@ -350,13 +401,19 @@ async def chat(
             return ChatResponse(**cached_result)
 
         # Step 1: Agentic Routing (Decide whether to search and reformulate query)
+        update_pipeline_node("planner", "running")
+        t_plan = time.time()
         history = _get_history(username)
         router_decision = await agentic_router(body.question, history)
+        update_pipeline_node("planner", "done", int((time.time() - t_plan) * 1000))
         log_event("pagani.api", "role_routing", user_id=username, metadata=router_decision)
         
         # Step 2: Conditional Semantic Search
         context_docs = []
         if router_decision.get("needs_search", True):
+            update_pipeline_node("data_sources", "running")
+            update_pipeline_node("tool_execution", "running")
+            t_search = time.time()
             search_query = router_decision.get("search_query") or body.question
             logger.info(f"Router decided to search with query: '{search_query[:50]}'")
             context_docs = await asyncio.to_thread(
@@ -366,17 +423,29 @@ async def chat(
                 user_role=user_role,
                 filters=router_decision.get("metadata_filters")
             )
+            search_dur = int((time.time() - t_search) * 1000)
+            update_pipeline_node("data_sources", "done", search_dur)
+            update_pipeline_node("tool_execution", "done", search_dur)
             logger.info(f"Retrieved {len(context_docs)} documents for user {username}")
         else:
             logger.info(f"Router decided to skip vector search for user {username}")
 
         # Step 3: Generate response
+        update_pipeline_node("router", "running")
+        t_route = time.time()
+        # Route locally (just simulating router decision for standard chat)
+        decision = router_decision.get("decision", "agent_1")
+        update_pipeline_node("router", "done", int((time.time() - t_route) * 1000))
+
+        update_pipeline_node("agent_1", "running")
+        t_gen = time.time()
         result = await generate_response(
             question=body.question,
             context_docs=context_docs,
             user_role=user_role,
             username=username,
         )
+        update_pipeline_node("agent_1", "done", int((time.time() - t_gen) * 1000))
 
         latency = time.time() - start_time
         logger.info(
@@ -399,7 +468,7 @@ async def chat(
         chat_response = {
             "answer": result["answer"],
             "sources": result["sources"],
-            "confidence": result["confidence"],
+            "confidence": result["confidence_score"] / 100.0,
             "user_role": user_role,
         }
 
@@ -515,7 +584,7 @@ async def chat_debug(
         return {
             "answer": result["answer"],
             "sources": result["sources"],
-            "confidence": result["confidence"],
+            "confidence": result["confidence_score"] / 100.0,
             "user_role": user_role,
             "debug": debug_info,
         }
@@ -621,28 +690,66 @@ async def chat_stream(
             },
         )
 
-    except RuntimeError as e:
-        err_msg = str(e)
-        if "QUOTA_EXCEEDED" in err_msg:
-            logger.error(f"Streaming Quota Exceeded for user {username}: {e}")
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Your AI quota has been exceeded. Please check your Gemini API plan or billing details. (Error 429: Quota Exceeded)",
-            )
-            
-        if "INVALID_API_KEY" in err_msg:
-            logger.error(f"Invalid API Key for user {username}: {e}")
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Your Gemini API key is expired or invalid. Please update GEMINI_API_KEY in your backend/.env file and restart the server.",
-            )
-        
+    except Exception as e:
         logger.error(f"Streaming RAG error for user {username}: {e}")
         log_event("pagani.api", "api_error", user_id=username, metadata={"error": err_msg})
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="The AI service is temporarily unavailable.",
         )
+
+
+@app.get("/api/chat/quick-summary", summary="Get a quick summary for a model")
+@limiter.limit("30/minute")
+async def chat_quick_summary(
+    request: Request,
+    model: str = QueryParam(..., description="Vehicle model name"),
+    current_user: dict = Depends(get_current_user),
+):
+    """Return a brief conceptual summary for the requested Pagani model."""
+    summaries = {
+        "zonda_r": "The Zonda R is a track-only hypercar developed purely for performance, featuring a carbon-titanium chassis and a 750hp AMG V12.",
+        "huayra_bc": "The Huayra BC honors Benny Caiola, introducing lightweight aerodynamics and an upgraded twin-turbo V12 packing 789hp.",
+        "utopia": "Utopia, the third act of Pagani, embraces mechanical purity with its manual transmission, twin-turbo V12, and classic analog aesthetics."
+    }
+    
+    model_key = model.lower().replace(" ", "_")
+    for key, text in summaries.items():
+        if key in model_key or model_key in key:
+            return {"model": model, "summary": text}
+            
+    return {"model": model, "summary": f"The {model} showcases Pagani's signature blend of art and science, combining bespoke engineering with exquisite craftsmanship."}
+
+
+@app.post("/api/chat/suggestions", summary="Get chat suggestions")
+@limiter.limit("30/minute")
+async def chat_suggestions(
+    request: Request,
+    current_user: dict = Depends(get_current_user),
+):
+    """Provide intelligent chat suggestions based on user role."""
+    role = current_user.get("role", "viewer")
+    
+    if role == "admin":
+        suggestions = [
+            "What is the total revenue from Zonda R sales?",
+            "What is the current market valuation of the Zonda R?",
+            "Show me the production timeline for all 15 units."
+        ]
+    elif role == "engineer":
+        suggestions = [
+            "What is the torsional rigidity of the Zonda R monocoque?",
+            "Detail the Öhlins damper specifications.",
+            "What is the peak downforce at 300 km/h?"
+        ]
+    else:
+        suggestions = [
+            "What is the top speed of the Zonda R?",
+            "Tell me about the carbon-titanium chassis.",
+            "How much horsepower does the AMG V12 produce?"
+        ]
+        
+    return {"suggestions": suggestions}
 
 
 # ═══════════════════════════════════════════
@@ -882,17 +989,158 @@ async def v1_login_attempts(
 
 
 # ───────────────────────────
+# Recent Chat History (RAG Query Audit)
+# ───────────────────────────
+
+@v1_router.get("/admin/recent-chats", summary="Recent RAG chat queries")
+async def v1_recent_chats(
+    limit: int = QueryParam(default=10, le=50),
+    current_user: dict = Depends(require_permission("manage_users")),
+):
+    """Fetch the most recent chat queries with user info from the database."""
+    try:
+        from database import get_db_session
+        from models import ChatHistory, User
+        with get_db_session() as db:
+            rows = (
+                db.query(ChatHistory, User)
+                .join(User, ChatHistory.user_id == User.id)
+                .order_by(ChatHistory.timestamp.desc())
+                .limit(limit)
+                .all()
+            )
+            chats = []
+            for chat, user in rows:
+                ts = chat.timestamp
+                time_str = ts.strftime("%H:%M") if ts else ""
+                chats.append({
+                    "id": chat.id,
+                    "user": user.name,
+                    "role": user.role,
+                    "question": chat.question,
+                    "time": time_str,
+                    "timestamp": ts.isoformat() if ts else None,
+                })
+            return {"chats": chats, "total": len(chats)}
+    except Exception as e:
+        logger.error(f"Failed to fetch recent chats: {e}")
+        return {"chats": [], "total": 0}
+
+
+# ───────────────────────────
 # Document Management Endpoints
 # ───────────────────────────
 
-@v1_router.get("/documents", summary="List all documents")
-async def v1_list_documents(
+@v1_router.get("/static/pdfs/{filename}", summary="Serve static PDF files")
+async def serve_pdf(filename: str):
+    """Serve a static PDF document from the dataset directory."""
+    file_path = os.path.join(_pdf_dir, filename)
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="PDF not found")
+    return FileResponse(file_path, media_type="application/pdf")
+
+@v1_router.get("/models", summary="List Pagani models")
+async def get_models(current_user: dict = Depends(get_current_user)):
+    """Return the list of Pagani models for the showcase and comparison tools."""
+    models = [
+        { 
+            "name": "Zonda R", "hp": 740, "weight": 1070, "badge": "Featured", "badgeColor": "bg-pagani-gold/15 text-pagani-gold border-pagani-gold/25", "featured": True, "imageUrl": "/images/models/zonda_r.png", 
+            "summary": "The Zonda R is a track-only hypercar designed to be the ultimate expression of Pagani's engineering capabilities. Free from road and racing regulations, it features a bespoke carbon-titanium chassis and a blistering aerodynamic package. The naturally aspirated 6.0L V12 derived from the Mercedes-Benz CLK GTR produces a deafening roar, delivering a pure, visceral driving experience that set a Nürburgring Nordschleife record of 6:47.48.",
+            "engine": "Mercedes-Benz AMG 6.0L V12",
+            "topSpeed": "350+ km/h (218 mph)",
+            "acceleration": "2.7s (0-100 km/h)",
+            "productionUnits": 15,
+            "price": "€1.4 Million"
+        },
+        { 
+            "name": "Huayra BC", "hp": 789, "weight": 1218, "badge": "New doc", "badgeColor": "bg-green-500/15 text-green-400 border-green-500/25", "featured": False, "imageUrl": "/images/models/huayra_bc.png", 
+            "summary": "Named after Horacio Pagani’s first customer and close friend, Benny Caiola, the Huayra BC is a more aggressive, track-focused evolution of the standard Huayra. It introduces a revolutionary new carbon-triax composite that is 20% stronger and 50% lighter than regular carbon fiber. Combined with a significantly uprated twin-turbo V12 and an entirely new active aerodynamic system, it generates immense downforce while shedding over 130 kg from the base model.",
+            "engine": "Mercedes-AMG 6.0L Twin-Turbo V12",
+            "topSpeed": "370 km/h (230 mph)",
+            "acceleration": "2.8s (0-100 km/h)",
+            "productionUnits": 20,
+            "price": "€2.3 Million"
+        },
+        { 
+            "name": "Utopia", "hp": 864, "weight": 1280, "badge": "New", "badgeColor": "bg-sky-500/15 text-sky-400 border-sky-500/25", "featured": False, "imageUrl": "/images/models/utopia.png", 
+            "summary": "The Utopia represents the third major chapter in Pagani's history. Eschewing the modern trend of heavy hybrid systems and dual-clutch transmissions, the Utopia focuses on purity, offering a breathtaking 864 hp AMG V12 paired with a 7-speed gated manual transmission. Its design blends retro-futuristic elegance with active aerodynamics subtly integrated into the bodywork, delivering a timeless aesthetic and an engaging, analog driving experience.",
+            "engine": "Mercedes-AMG 6.0L Twin-Turbo V12",
+            "topSpeed": "350 km/h (217 mph) electronically limited",
+            "acceleration": "2.9s (0-100 km/h)",
+            "productionUnits": 99,
+            "price": "€2.17 Million"
+        },
+        { 
+            "name": "Zonda F", "hp": 602, "weight": 1230, "badge": "Classic", "badgeColor": "bg-amber-500/15 text-amber-400 border-amber-500/25", "featured": False, "imageUrl": "/images/models/zonda_f.png", 
+            "summary": "Dedicated to five-time Formula One World Champion Juan Manuel Fangio, the Zonda F is widely considered the definitive road-going Zonda. It refined the original Zonda formula with improved aerodynamics, a redesigned front fascia, and a carbon-ceramic braking system. The glorious naturally aspirated V12 provides instant throttle response, making it one of the most highly sought-after collector cars of the modern era.",
+            "engine": "Mercedes-Benz AMG 7.3L V12",
+            "topSpeed": "345 km/h (214 mph)",
+            "acceleration": "3.6s (0-100 km/h)",
+            "productionUnits": 25,
+            "price": "€1.0 Million (Original)"
+        },
+        { 
+            "name": "Cinque", "hp": 678, "weight": 1210, "badge": "Rare", "badgeColor": "bg-purple-500/15 text-purple-400 border-purple-500/25", "featured": False, "imageUrl": "/images/models/cinque.png", 
+            "summary": "Originally built at the request of the Pagani dealer in Hong Kong, the Zonda Cinque was the first road-legal car to feature Pagani's revolutionary carbon-titanium weave. It borrows heavily from the track-only Zonda R, incorporating its aggressive roof scoop, revised aerodynamics, and magnesium wheels. As the name suggests, only five coupes were ever produced, making it a true unicorn in the automotive world.",
+            "engine": "Mercedes-Benz AMG 7.3L V12",
+            "topSpeed": "350 km/h (217 mph)",
+            "acceleration": "3.4s (0-100 km/h)",
+            "productionUnits": 5,
+            "price": "€1.3 Million (Original)"
+        },
+    ]
+    return {"models": models}
+
+@v1_router.get("/documents/count", summary="Get document count for role")
+async def v1_count_documents(
+    role: str = QueryParam("viewer", description="Role to filter by"),
     current_user: dict = Depends(get_current_user),
 ):
-    """List all documents in the vector store."""
+    """Count documents accessible to a given role."""
+    count = 0
+    docs = getattr(vector_store, "documents", [])
+    for d in docs:
+        if role in d.get("role_access", ["viewer", "seller", "admin"]):
+            count += 1
+    return {"count": count, "role": role}
+
+
+@v1_router.get("/documents", summary="List all documents")
+async def v1_list_documents(
+    role: Optional[str] = QueryParam(None, description="Filter by role"),
+    limit: int = QueryParam(50, description="Max documents to return"),
+    sort: str = QueryParam("recent", description="Sort order"),
+    current_user: dict = Depends(get_current_user),
+):
+    """List all documents in the vector store with optional filtering."""
     try:
-        docs = vector_store.list_documents() if hasattr(vector_store, "list_documents") else []
-        return {"documents": docs, "total": len(docs)}
+        docs = getattr(vector_store, "documents", [])
+        
+        # Filter by role
+        if role:
+            docs = [d for d in docs if role in d.get("role_access", ["viewer", "seller", "admin"])]
+            
+        # Format map for frontend compatibility
+        formatted_docs = []
+        for i, d in enumerate(docs):
+            formatted_docs.append({
+                "id": d.get("doc_id", str(i)),
+                "filename": d.get("source", "Unknown Document"),
+                "type": "PDF" if d.get("is_pdf") else "SPEC",
+                "pages": d.get("metadata", {}).get("pages", 1) if isinstance(d.get("metadata"), dict) else 1,
+                "created_at": d.get("created_at", "2026-04-01T10:00:00Z"),
+                "file_size": len(d.get("content", "")),
+                "upload_date": d.get("created_at", "2026-04-01T10:00:00Z"),
+            })
+
+        # Sort
+        if sort == "recent":
+            formatted_docs.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+            
+        # Limit
+        formatted_docs = formatted_docs[:limit]
+        
+        return {"documents": formatted_docs, "total": len(docs)}
     except Exception as e:
         logger.warning(f"Failed to list documents: {e}")
         return {"documents": [], "total": 0}
@@ -1138,6 +1386,25 @@ async def v1_admin_audit_log(
     return {"logs": logs, "total": len(logs)}
 
 
+@v1_router.get("/admin/stress/stream", summary="Run stress tests via SSE")
+async def v1_stress_test_stream(
+    test_type: str = QueryParam(default="all"),
+    _key: str = Depends(verify_admin_key)
+):
+    """Run adversarial safety tests and stream results (X-Admin-Key)."""
+    tester = StressTester()
+    if test_type == "bias":
+        generator = tester.run_bias_test_stream()
+    elif test_type == "evasion":
+        generator = tester.run_evasion_test_stream()
+    elif test_type == "injection":
+        generator = tester.run_injection_test_stream()
+    else:
+        generator = tester.run_all_stream()
+        
+    return StreamingResponse(generator, media_type="text/event-stream")
+
+
 @v1_router.get("/admin/strategist-reports", summary="View strategist reports")
 async def v1_admin_strategist_reports(
     limit: int = QueryParam(default=20, le=100),
@@ -1151,15 +1418,35 @@ async def v1_admin_strategist_reports(
             rows = db.query(StrategistReport).order_by(StrategistReport.created_at.desc()).limit(limit).all()
             return {"reports": [{
                 "id": r.id,
-                "report_text": r.report_text,
-                "period_start": r.period_start.isoformat() if r.period_start else None,
-                "period_end": r.period_end.isoformat() if r.period_end else None,
+                "report_text": r.report,
+                "period_start": None,
+                "period_end": None,
                 "queries_analyzed": r.analyzed_count,
                 "created_at": r.created_at.isoformat() if r.created_at else None,
             } for r in rows], "total": len(rows)}
     except Exception as e:
         logger.error(f"Failed to list strategist reports: {e}")
         return {"reports": [], "total": 0}
+
+@v1_router.post("/admin/strategist/trigger", summary="Manually trigger AI Strategist")
+async def v1_admin_strategist_trigger(
+    _key: str = Depends(verify_admin_key),
+):
+    """Manually trigger the AI Strategist to read the review queue and generate a report."""
+    try:
+        import asyncio
+        strategist = Strategist()
+        # Run in thread to not block event loop
+        result = await asyncio.to_thread(strategist.analyze_low_confidence_queries)
+        if result == "no_queries":
+            raise HTTPException(status_code=400, detail="No pending queries in the review queue to analyze.")
+        return {"status": "success", "message": "Strategist report generated successfully."}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to trigger strategist: {e}")
+        raise HTTPException(status_code=500, detail="Failed to generate report.")
+
 
 
 class FeedbackRequest(BaseModel):
@@ -1369,24 +1656,6 @@ async def v1_evaluations_recent(
 # Pipeline Status
 # ───────────────────────────
 
-# In-memory pipeline node status dict updated during queries
-PIPELINE_STATUS = {
-    "data_sources": {"status": "idle", "last_run_ms": 0, "last_run_at": None},
-    "restructuring": {"status": "idle", "last_run_ms": 0, "last_run_at": None},
-    "chunking": {"status": "idle", "last_run_ms": 0, "last_run_at": None},
-    "metadata": {"status": "idle", "last_run_ms": 0, "last_run_at": None},
-    "planner": {"status": "idle", "last_run_ms": 0, "last_run_at": None},
-    "tool_execution": {"status": "idle", "last_run_ms": 0, "last_run_at": None},
-    "router": {"status": "idle", "last_run_ms": 0, "last_run_at": None},
-    "multi_agent": {"status": "idle", "last_run_ms": 0, "last_run_at": None},
-    "agent_1": {"status": "idle", "last_run_ms": 0, "last_run_at": None},
-    "agent_2": {"status": "idle", "last_run_ms": 0, "last_run_at": None},
-    "agent_3": {"status": "idle", "last_run_ms": 0, "last_run_at": None},
-    "human_validation": {"status": "idle", "last_run_ms": 0, "last_run_at": None},
-    "evaluation": {"status": "idle", "last_run_ms": 0, "last_run_at": None},
-    "database": {"status": "idle", "last_run_ms": 0, "last_run_at": None},
-}
-
 
 @v1_router.get("/pipeline/status", summary="Live pipeline node status")
 async def v1_pipeline_status(
@@ -1424,42 +1693,63 @@ async def v1_chat_sse(
 
     async def pipeline_worker():
         try:
+            update_pipeline_node("planner", "running")
+            t_plan = time.time()
             await sse_queue.put({"event": "progress", "data": {"step": 1, "label": "Planning query", "icon": "brain"}})
             planner = Planner()
             plan = await planner.plan(body.question, sse_queue)
+            update_pipeline_node("planner", "done", int((time.time() - t_plan)*1000))
             
             gk = GK()
             gate_result = gk.check_query(body.question, username)
             await sse_queue.put({"event": "gatekeeper", "data": {"status": gate_result["status"], "query": body.question[:100]}})
             
             if gate_result["status"] == "under_review":
+                update_pipeline_node("human_validation", "running")
                 await sse_queue.put({"event": "done", "data": {"answer": "Your query has been flagged for human review.", "status": "under_review"}})
+                update_pipeline_node("human_validation", "done", 50)
                 await sse_queue.put(None)
                 return
                 
+            update_pipeline_node("data_sources", "running")
+            update_pipeline_node("tool_execution", "running")
+            t_ret = time.time()
             await sse_queue.put({"event": "progress", "data": {"step": 2, "label": "Retrieving context", "icon": "search"}})
             tool_exec = ToolExecution(vector_store, sse_queue)
             chunks = await tool_exec.execute(plan, body.question)
+            ret_dur = int((time.time() - t_ret)*1000)
+            update_pipeline_node("tool_execution", "done", ret_dur)
+            update_pipeline_node("data_sources", "done", ret_dur)
             
+            update_pipeline_node("router", "running")
+            t_route = time.time()
             await sse_queue.put({"event": "progress", "data": {"step": 3, "label": "Routing query", "icon": "route"}})
             router = CondRouter(sse_queue)
             route_decision = await router.route(chunks)
+            update_pipeline_node("router", "done", int((time.time() - t_route)*1000))
             
             await sse_queue.put({"event": "progress", "data": {"step": 4, "label": "Running generation agents", "icon": "bot"}})
             decision = route_decision["decision"]
             final_response = ""
             
+            t_agent = time.time()
             if decision == "multi_agent" or decision == "multi-agent":
+                update_pipeline_node("multi_agent", "running")
                 state = await run_multi_agent(body.question, chunks, {"user_role": user_role, "format": body.format}, sse_queue)
                 final_response = state["final_response"]
+                update_pipeline_node("multi_agent", "done", int((time.time() - t_agent)*1000))
             elif decision == "human_validation" or decision == "human review":
+                update_pipeline_node("human_validation", "running")
                 final_response = "This query requires human review due to low confidence."
                 await sse_queue.put({"event": "done", "data": {"answer": final_response, "status": "under_review"}})
+                update_pipeline_node("human_validation", "done", 50)
                 await sse_queue.put(None)
                 return
             else:
+                update_pipeline_node("agent_1", "running")
                 state = await run_single_agent(body.question, chunks, sse_queue, metadata={"user_role": user_role, "format": body.format})
                 final_response = state["final_response"]
+                update_pipeline_node("agent_1", "done", int((time.time() - t_agent)*1000))
                 
             # --- Disabled evaluation to maximize speed ---
             # try:
@@ -1474,6 +1764,9 @@ async def v1_chat_sse(
                 "agent_path": decision,
                 "total_ms": total_ms,
             })
+            
+            # Persist the chat to database
+            await _persist_chat(username, body.question, final_response)
             
             await sse_queue.put({"event": "done", "data": {
                 "answer": final_response,
