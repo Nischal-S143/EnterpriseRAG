@@ -89,7 +89,7 @@ VALID_ROLES = {"super_admin", "admin", "engineer", "viewer"}
 # ── Permission Matrix ──
 ROLE_PERMISSIONS: dict[str, list[str]] = {
     "super_admin": ["read", "write", "delete", "execute", "manage_roles", "manage_users"],
-    "admin": ["read", "write", "delete", "execute", "manage_users"],
+    "admin": ["read", "write", "delete", "execute", "manage_users", "manage_roles"],
     "engineer": ["read", "write", "execute"],
     "viewer": ["read"],
 }
@@ -132,12 +132,13 @@ class RefreshRequest(BaseModel):
 class ChatRequest(BaseModel):
     question: str = Field(..., min_length=1, max_length=2000)
     format: Optional[str] = Field(default="Standard")
+    metadata_filters: Optional[list[str]] = Field(default=None, description="Topic filter names from the Topic Explorer")
 
 
 class ChatResponse(BaseModel):
     answer: str
     sources: list[str]
-    confidence: str
+    confidence: float
     user_role: str
 
 
@@ -489,6 +490,23 @@ class Gatekeeper:
                 "status": "pending_review",
                 "timestamp": datetime.now(timezone.utc).isoformat()
             }
+            
+            # Save to database
+            try:
+                from database import get_db_session
+                from models import ReviewQueue as RQ
+                with get_db_session() as db:
+                    db.add(RQ(
+                        id=query_id,
+                        username=username,
+                        question=question,
+                        reason=reason,
+                        status="pending_review",
+                        confidence=confidence
+                    ))
+            except Exception as e:
+                logger.warning(f"Failed to persist review queue to DB: {e}")
+
             logger.warning(f"Gatekeeper flagged query from {username}. Reason: {reason}")
             return {"status": "under_review"}
             
