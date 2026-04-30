@@ -28,8 +28,9 @@ def setup_test_db():
         from database import engine
         engine.dispose()
         os.remove("test_enterprise.db")
-    except (FileNotFoundError, PermissionError):
-        pass
+    except (FileNotFoundError, PermissionError) as e:
+        import logging
+        logging.debug(f"Test DB cleanup skipped: {e}")
 
 
 @pytest.fixture(scope="session")
