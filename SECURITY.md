@@ -36,7 +36,14 @@ This project implements:
 - **Security headers** (X-Content-Type-Options, X-Frame-Options, CSP, etc.)
 - **Request size limiting** (1MB max body)
 - **CORS restrictions** (localhost only in development)
-- **Frontend input sanitization** (HTML tag stripping, XSS prevention)
+- **Frontend input sanitization** (HTML tag stripping, robust XSS prevention)
+- **CSRF Immunity**: Tokens are stored in `localStorage` and manually attached to headers, preventing automatic browser credential submission required for CSRF attacks.
+
+## CSRF Protection
+
+The application stores JWT tokens in `localStorage` and manually includes them in the `Authorization: Bearer <token>` header for all authenticated requests. 
+
+Because the browser does not automatically attach `localStorage` data to outgoing requests, the application is **naturally immune to Cross-Site Request Forgery (CSRF)**. CSRF relies on the browser automatically sending credentials (like cookies) to the target domain without user interaction, which is impossible with `localStorage` tokens as they require JavaScript to be read and attached.
 
 ## Best Practices for Deployment
 

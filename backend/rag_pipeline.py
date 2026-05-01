@@ -248,6 +248,8 @@ async def generate_response(
         return {
             "answer": answer,
             "sources": sources,
+            "document_ids": list({doc.get("doc_id", doc.get("source", "unknown")) for doc in context_docs}),
+            "avg_reranker_score": confidence["score"],
             "confidence": confidence["label"],
             "confidence_score": confidence["score"],
             "latency_s": round(latency, 2),
@@ -266,6 +268,7 @@ async def generate_response_stream(
     username: str = "guest",
 ):
     try:
+        start_time = time.time()
         history = _get_history(username)
         system_prompt = _build_prompt(context_docs, user_role, history)
         
@@ -277,14 +280,18 @@ async def generate_response_stream(
         response_stream = await _gemini_call_with_retry(GENERATION_MODEL, messages, stream=True)
 
         full_answer = ""
+        ttft = None
         async for chunk in response_stream:
+            if ttft is None:
+                ttft = time.time() - start_time
             # OpenAI chunk structure
             if chunk.choices and chunk.choices[0].delta.content:
                 text = chunk.choices[0].delta.content
                 full_answer += text
                 yield text
 
-        logger.info(f"Streaming RAG response completed for: '{question[:60]}...'")
+        latency = time.time() - start_time
+        logger.info(f"Streaming RAG response completed | TTFT={ttft:.2f}s | latency={latency:.2f}s")
         _add_to_history(username, question, full_answer)
 
     except Exception as e:

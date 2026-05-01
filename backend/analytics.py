@@ -254,6 +254,136 @@ def export_analytics_csv(days: int = 30) -> str:
         logger.error(f"Failed to export analytics: {e}")
         return f"Error: {e}"
 
+
+def track_session_start(user_id: str):
+    """Record the start of a user session."""
+    try:
+        from database import get_db_session
+        from models import User, AnalyticsSession
+        with get_db_session() as db:
+            user = db.query(User).filter(User.name == user_id).first()
+            if user:
+                # Close any existing open sessions for this user
+                open_sessions = db.query(AnalyticsSession).filter(
+                    AnalyticsSession.user_id == user.id,
+                    AnalyticsSession.end_time == None
+                ).all()
+                for s in open_sessions:
+                    s.end_time = datetime.now(timezone.utc)
+                    s.duration_seconds = int((s.end_time - s.start_time).total_seconds())
+
+                db.add(AnalyticsSession(user_id=user.id))
+    except Exception as e:
+        logger.warning(f"Failed to track session start: {e}")
+
+
+def track_session_end(user_id: str):
+    """Record the end of a user session."""
+    try:
+        from database import get_db_session
+        from models import User, AnalyticsSession
+        with get_db_session() as db:
+            user = db.query(User).filter(User.name == user_id).first()
+            if user:
+                latest = db.query(AnalyticsSession).filter(
+                    AnalyticsSession.user_id == user.id,
+                    AnalyticsSession.end_time == None
+                ).order_by(AnalyticsSession.start_time.desc()).first()
+                if latest:
+                    latest.end_time = datetime.now(timezone.utc)
+                    latest.duration_seconds = int((latest.end_time - latest.start_time).total_seconds())
+    except Exception as e:
+        logger.warning(f"Failed to track session end: {e}")
+
+
+def get_analytics_summary(days: int = 7) -> dict:
+    """Aggregate detailed metrics for the admin dashboard."""
+    try:
+        from database import get_db_session
+        from models import AnalyticsEvent, AnalyticsSession
+        from sqlalchemy import func
+        from collections import Counter
+
+        now = datetime.now(timezone.utc)
+        cutoff_7d = now - timedelta(days=days)
+        cutoff_24h = now - timedelta(hours=24)
+
+        with get_db_session() as db:
+            # 1. Top 5 documents
+            events = db.query(AnalyticsEvent).filter(
+                AnalyticsEvent.event_type == "response_received",
+                AnalyticsEvent.timestamp >= cutoff_7d
+            ).all()
+            
+            doc_counts = Counter()
+            for ev in events:
+                if ev.metadata_ and "document_ids" in ev.metadata_:
+                    for d_id in ev.metadata_["document_ids"]:
+                        doc_counts[d_id] += 1
+            
+            top_docs = [{"id": k, "count": v} for k, v in doc_counts.most_common(5)]
+
+            # 2. Avg Response Time (24h)
+            recent_responses = db.query(AnalyticsEvent).filter(
+                AnalyticsEvent.event_type == "response_received",
+                AnalyticsEvent.timestamp >= cutoff_24h
+            ).all()
+            
+            latencies = []
+            for ev in recent_responses:
+                if ev.metadata_:
+                    # Prefer ttft_ms if available, else latency_s * 1000
+                    if "ttft_ms" in ev.metadata_:
+                        latencies.append(ev.metadata_["ttft_ms"])
+                    elif "latency_s" in ev.metadata_:
+                        latencies.append(ev.metadata_["latency_s"] * 1000)
+            
+            avg_latency = sum(latencies) / len(latencies) if latencies else 0
+
+            # 3. Query volume (7 days)
+            query_volume = []
+            for i in range(days):
+                day_start = (now - timedelta(days=i+1)).replace(hour=0, minute=0, second=0, microsecond=0)
+                day_end = day_start + timedelta(days=1)
+                count = db.query(func.count(AnalyticsEvent.id)).filter(
+                    AnalyticsEvent.event_type == "query_submitted",
+                    AnalyticsEvent.timestamp >= day_start,
+                    AnalyticsEvent.timestamp < day_end
+                ).scalar() or 0
+                query_volume.append({"date": day_start.strftime("%m-%d"), "count": count})
+            query_volume.reverse()
+
+            # 4. Failed query rate
+            total_queries = db.query(func.count(AnalyticsEvent.id)).filter(
+                AnalyticsEvent.event_type == "query_submitted",
+                AnalyticsEvent.timestamp >= cutoff_7d
+            ).scalar() or 0
+            
+            failed_queries = db.query(func.count(AnalyticsEvent.id)).filter(
+                AnalyticsEvent.event_type == "failed_query",
+                AnalyticsEvent.timestamp >= cutoff_7d
+            ).scalar() or 0
+            
+            failed_rate = round(failed_queries / total_queries * 100, 1) if total_queries > 0 else 0
+
+            # 5. Session duration (Avg)
+            avg_session = db.query(func.avg(AnalyticsSession.duration_seconds)).filter(
+                AnalyticsSession.end_time != None,
+                AnalyticsSession.start_time >= cutoff_7d
+            ).scalar() or 0
+
+            return {
+                "top_documents": top_docs,
+                "avg_response_time_ms": round(avg_latency, 1),
+                "query_volume": query_volume,
+                "failed_query_rate": failed_rate,
+                "avg_session_duration_s": round(avg_session, 1),
+                "generated_at": now.isoformat()
+            }
+    except Exception as e:
+        logger.error(f"Failed to compute analytics summary: {e}")
+        return {"error": str(e)}
+
 # ═══════════════════════════════════════════
 # Strategist AI Agent
 # ═══════════════════════════════════════════

@@ -34,6 +34,7 @@ class User(Base):
     chat_history = relationship("ChatHistory", back_populates="user", cascade="all, delete-orphan")
     system_logs = relationship("SystemLog", back_populates="user", cascade="all, delete-orphan")
     analytics_events = relationship("AnalyticsEvent", back_populates="user", cascade="all, delete-orphan")
+    analytics_sessions = relationship("AnalyticsSession", back_populates="user", cascade="all, delete-orphan")
 
     def __repr__(self):
         return f"<User(name='{self.name}', role='{self.role}')>"
@@ -105,6 +106,21 @@ class Document(Base):
 
     def __repr__(self):
         return f"<Document(filename='{self.filename}', uploaded_by='{self.uploaded_by}')>"
+
+
+class DocumentVersion(Base):
+    __tablename__ = "document_versions"
+
+    id = Column(String(36), primary_key=True, default=_generate_uuid)
+    document_id = Column(String(36), ForeignKey("documents.id"), nullable=False)
+    version_number = Column(Integer, nullable=False)
+    content_hash = Column(String(64), nullable=True)  # SHA-256 hash of file content
+    file_path = Column(String(500), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=_utcnow)
+    created_by = Column(String(50), nullable=False)
+
+    # Use string-based reference to avoid circular dependency if models are split
+    document = relationship("Document", backref="versions")
 
 
 class RoleAuditLog(Base):
@@ -217,3 +233,19 @@ class GoldenAnswer(Base):
 
     def __repr__(self):
         return f"<GoldenAnswer(query='{self.query[:40]}...')>"
+
+
+class AnalyticsSession(Base):
+    __tablename__ = "analytics_sessions"
+
+    id = Column(String(36), primary_key=True, default=_generate_uuid)
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    start_time = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    end_time = Column(DateTime(timezone=True), nullable=True)
+    duration_seconds = Column(Integer, nullable=True)
+
+    # Relationships
+    user = relationship("User", back_populates="analytics_sessions")
+
+    def __repr__(self):
+        return f"<AnalyticsSession(user_id='{self.user_id}', duration={self.duration_seconds})>"

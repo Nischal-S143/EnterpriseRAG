@@ -11,9 +11,10 @@ from typing import Optional
 from fastapi import Depends, HTTPException, status, Header
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import secrets
+import bleach
 from jose import JWTError, jwt
 from passlib.context import CryptContext
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -43,8 +44,21 @@ def _log_auth_event(action: str, username: str, metadata: dict | None = None):
     log_event("pagani.auth", action, user_id=username, metadata=metadata)
 
 # ── Configuration ──
-JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "pagani-default-secret")
-JWT_REFRESH_SECRET_KEY = os.getenv("JWT_REFRESH_SECRET_KEY", "pagani-refresh-secret")
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "")
+JWT_REFRESH_SECRET_KEY = os.getenv("JWT_REFRESH_SECRET_KEY", "")
+
+# Validate at import time — tests inject these via conftest.py before import
+if not JWT_SECRET_KEY:
+    raise ValueError(
+        "JWT_SECRET_KEY environment variable is required but not set. "
+        "Set it in your .env file or pass it via docker-compose."
+    )
+if not JWT_REFRESH_SECRET_KEY:
+    raise ValueError(
+        "JWT_REFRESH_SECRET_KEY environment variable is required but not set. "
+        "Set it in your .env file or pass it via docker-compose."
+    )
+
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
 REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "7"))
 ALGORITHM = "HS256"
@@ -110,11 +124,19 @@ class UserRegister(BaseModel):
     password: str = Field(..., min_length=6, max_length=128)
     role: str = Field(default="viewer")
 
+    @field_validator("username")
+    @classmethod
+    def sanitize_username(cls, v: str) -> str:
+        return bleach.clean(v, tags=[], strip=True)
 
 class UserLogin(BaseModel):
     username: str
     password: str
 
+    @field_validator("username")
+    @classmethod
+    def sanitize_username(cls, v: str) -> str:
+        return bleach.clean(v, tags=[], strip=True)
 
 class TokenResponse(BaseModel):
     access_token: str
@@ -124,15 +146,18 @@ class TokenResponse(BaseModel):
     role: str
     username: str
 
-
 class RefreshRequest(BaseModel):
     refresh_token: str
-
 
 class ChatRequest(BaseModel):
     question: str = Field(..., min_length=1, max_length=2000)
     format: Optional[str] = Field(default="Standard")
     metadata_filters: Optional[list[str]] = Field(default=None, description="Topic filter names from the Topic Explorer")
+
+    @field_validator("question")
+    @classmethod
+    def sanitize_question(cls, v: str) -> str:
+        return bleach.clean(v, tags=[], strip=True)
 
 
 class ChatResponse(BaseModel):

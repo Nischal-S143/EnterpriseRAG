@@ -219,6 +219,49 @@ class VectorStore:
                 
             self._persist()
             logger.info(f"FAISS index updated: {self.index.ntotal} vectors total")
+
+    def ingest_document(self, filename: str, content: bytes):
+        """Extract text from a file (PDF/Text) and ingest into the vector store."""
+        import io
+        ext = os.path.splitext(filename)[1].lower()
+        text = ""
+        try:
+            if ext == ".pdf":
+                from pypdf import PdfReader
+                reader = PdfReader(io.BytesIO(content))
+                for page in reader.pages:
+                    text += (page.extract_text() or "") + "\n"
+            elif ext in [".docx"]:
+                import docx
+                doc = docx.Document(io.BytesIO(content))
+                text = "\n".join([p.text for p in doc.paragraphs])
+            else:
+                text = content.decode("utf-8", errors="ignore")
+        except Exception as e:
+            logger.error(f"Failed to extract text from {filename}: {e}")
+            return filename
+
+        if not text.strip():
+            logger.warning(f"No text extracted from {filename}")
+            return filename
+
+        # Split into chunks of ~2000 chars
+        chunks = []
+        chunk_size = 2000
+        for i in range(0, len(text), chunk_size):
+            chunk_text = text[i:i+chunk_size]
+            chunks.append({
+                "content": chunk_text,
+                "role_access": ["admin", "engineer", "viewer"],
+                "source": filename,
+                "is_pdf": ext == ".pdf",
+                "doc_id": filename,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "metadata": {"chunk": i // chunk_size, "filename": filename}
+            })
+        
+        self.ingest_pdf_chunks(chunks)
+        return filename
             
     def _embed_texts(self, texts: list[str]) -> np.ndarray:
         """Embed a list of texts using Gemini text-embedding-004."""
@@ -720,6 +763,66 @@ class VectorStore:
                 return os.path.join(pdf_dir, fname)
 
         return None
+
+    def delete_document(self, doc_id: str) -> bool:
+        """Remove a document and its vectors from the store."""
+        if not self._initialized:
+            self.initialize()
+            
+        with self._lock:
+            # 1. Find indices of chunks for this doc
+            indices_to_remove = []
+            new_docs = []
+            for i, doc in enumerate(self.documents):
+                # Match by explicit doc_id or by source filename
+                if doc.get("doc_id") == doc_id or doc.get("source") == doc_id:
+                    indices_to_remove.append(i)
+                else:
+                    new_docs.append(doc)
+            
+            if not indices_to_remove:
+                logger.warning(f"No chunks found in VectorStore for doc_id: {doc_id}")
+                return False
+                
+            # 2. Update documents list
+            self.documents = new_docs
+            
+            # 3. Update FAISS index
+            if self.embeddings is not None and len(self.embeddings) > 0:
+                # Remove from embeddings array using boolean mask
+                mask = np.ones(len(self.embeddings), dtype=bool)
+                # Ensure indices are within bounds
+                valid_indices = [idx for idx in indices_to_remove if idx < len(mask)]
+                mask[valid_indices] = False
+                self.embeddings = self.embeddings[mask]
+                
+                # Rebuild FAISS index from remaining embeddings
+                if len(self.embeddings) > 0:
+                    self.index = faiss.IndexFlatIP(self.dimension)
+                    # Create a copy to ensure memory alignment for FAISS
+                    emb_copy = np.ascontiguousarray(self.embeddings)
+                    faiss.normalize_L2(emb_copy)
+                    self.index.add(emb_copy)
+                    self.embeddings = emb_copy
+                else:
+                    self.index = None
+                    self.embeddings = None
+            
+            # 4. Rebuild BM25
+            if BM25Okapi is not None and self.documents:
+                tokenized_corpus = []
+                for doc in self.documents:
+                    text = doc.get("content", "")
+                    heading = doc.get("heading_path", "")
+                    tokenized_corpus.append(self._tokenize(f"{heading} {text}".strip()))
+                self.bm25_index = BM25Okapi(tokenized_corpus)
+            else:
+                self.bm25_index = None
+                
+            # 5. Persist the updated state
+            self._persist()
+            logger.info(f"Deleted document {doc_id} from vector store ({len(indices_to_remove)} chunks removed)")
+            return True
 
     def get_document(self, doc_id: str) -> dict | None:
         """Retrieve a full document: extracts full text from the original PDF if available."""

@@ -75,7 +75,7 @@ def get_db_read():
 def init_db():
     """Create all tables. Safe to call multiple times."""
     from models import (  # noqa
-        User, ChatHistory, SystemLog, AnalyticsEvent, Document, RoleAuditLog,
+        User, ChatHistory, SystemLog, AnalyticsEvent, Document, DocumentVersion, RoleAuditLog,
         Evaluation, AuditLog, ReviewQueue, Feedback, StrategistReport, GoldenAnswer,
     )
     Base.metadata.create_all(bind=engine)

@@ -26,3 +26,6 @@ python-docx
 openpyxl
 rank-bm25
 openai
+bleach==6.1.0
+flake8
+pylint

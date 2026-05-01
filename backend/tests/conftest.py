@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 # Set test environment variables before importing any backend modules
 os.environ["DATABASE_URL"] = "sqlite:///test_enterprise.db"
 os.environ["JWT_SECRET_KEY"] = "test-secret-key-for-testing-only"
+os.environ["JWT_REFRESH_SECRET_KEY"] = "test-refresh-secret-key-for-testing-only"
 os.environ["GEMINI_API_KEY"] = "test-api-key"
 os.environ["DEBUG_MODE"] = "true"
 os.environ["TESTING"] = "true"

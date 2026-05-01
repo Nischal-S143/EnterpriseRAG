@@ -11,6 +11,7 @@ import logging
 from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 import asyncio
+import hashlib
 from typing import Optional
 
 from fastapi import (
@@ -20,10 +21,12 @@ from fastapi import (
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse, PlainTextResponse, FileResponse
+from sqlalchemy.orm import Session
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
-from pydantic import BaseModel, Field
+import bleach
+from pydantic import BaseModel, Field, field_validator
 from dotenv import load_dotenv
 
 from auth import (
@@ -40,14 +43,16 @@ from rag_pipeline import (
     _get_history,
 )
 from logging_config import setup_logging, log_event
-from database import check_db_connection
+from database import check_db_connection, get_db
+from models import Document, DocumentVersion
 from middleware import SecurityHeadersMiddleware, RequestSizeLimitMiddleware, RequestTracingMiddleware
 from error_handlers import register_error_handlers
 from audit import audit, get_audit_logs, get_login_attempts
 from analytics import (
     get_user_engagement_metrics, get_query_success_rates,
     get_ai_performance_metrics, get_system_health,
-    export_analytics_csv, Strategist, set_server_start_time,
+    export_analytics_csv, get_analytics_summary, Strategist, set_server_start_time,
+    track_session_start, track_session_end,
 )
 from websocket_manager import ws_manager
 from cache import query_cache
@@ -292,8 +297,6 @@ async def _persist_chat(username: str, question: str, response: str):
 
 @app.get("/api/health")
 async def health_check():
-    log_event("pagani.api", "system_health_check")
-
     # Database status
     db_connected = check_db_connection()
 
@@ -307,14 +310,21 @@ async def health_check():
 
     overall_status = "healthy" if (db_connected and ai_available) else "degraded"
 
-    return {
+    health_data = {
         "status": overall_status,
         "database": "connected" if db_connected else "disconnected",
         "ai_service": "available" if ai_available else "unavailable",
-        "uptime": f"{uptime_seconds:.0f}s",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "uptime_s": int(uptime_seconds),
         "vector_store_initialized": ai_available,
         "registered_users": len(users_db),
+    }
+
+    log_event("pagani.api", "system_health_check", user_id="System", metadata=health_data)
+
+    return {
+        **health_data,
+        "uptime": f"{uptime_seconds:.0f}s",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
 
@@ -346,6 +356,7 @@ async def login(request: Request, user: UserLogin):
     log_event("pagani.api", "user_login", user_id=user.username)
     result = await authenticate_user(user)
     _track_analytics("login_success", user_id=user.username)
+    track_session_start(user.username)
     return result
 
 
@@ -355,6 +366,16 @@ async def refresh(request: Request, body: RefreshRequest):
     """Exchange a valid refresh token for a new access + refresh token pair."""
     logger.info("Token refresh attempt")
     return refresh_access_token(body.refresh_token)
+
+
+@app.post("/api/logout")
+async def logout_endpoint(current_user: dict = Depends(get_current_user)):
+    """Log out the current user and track session end."""
+    username = current_user["username"]
+    logger.info(f"Logout: {username}")
+    _track_analytics("logout", user_id=username)
+    track_session_end(username)
+    return {"message": "Logged out successfully"}
 
 
 @app.get("/api/me", response_model=UserInfo)
@@ -460,7 +481,12 @@ async def chat(
         _track_analytics("response_received", user_id=username, metadata={
             "confidence": result["confidence"],
             "latency_s": round(latency, 2),
+            "document_ids": result.get("document_ids", []),
+            "avg_reranker_score": result.get("avg_reranker_score", 0),
         })
+
+        if not context_docs:
+            _track_analytics("failed_query", user_id=username, metadata={"question": body.question[:100]})
 
         # Persist chat to DB (additive)
         await _persist_chat(username, body.question, result["answer"])
@@ -677,7 +703,13 @@ async def chat_stream(
             # Cache the result
             query_cache.set(cache_key, {"answer": full_response})
             
-            _track_analytics("response_received", user_id=username, metadata={"streaming": True})
+            _track_analytics("response_received", user_id=username, metadata={
+                "streaming": True,
+                "ttft_ms": int(ttft * 1000) if 'ttft' in locals() else None,
+                "document_ids": list({doc.get("doc_id", doc.get("source", "unknown")) for doc in context_docs}),
+            })
+            if not context_docs:
+                _track_analytics("failed_query", user_id=username, metadata={"question": body.question[:100]})
             log_event("pagani.api", "chat_response", user_id=username, metadata={"streaming": True})
 
         return StreamingResponse(
@@ -763,10 +795,28 @@ v1_router = APIRouter(prefix="/api/v1", tags=["Enterprise V1"])
 class RoleChangeRequest(BaseModel):
     new_role: str = Field(..., description="New role to assign")
 
+    @field_validator("new_role")
+    @classmethod
+    def sanitize_new_role(cls, v: str) -> str:
+        return bleach.clean(v, tags=[], strip=True)
 
 class DocumentMetadataUpdate(BaseModel):
     title: Optional[str] = None
     tags: Optional[list[str]] = None
+
+    @field_validator("title")
+    @classmethod
+    def sanitize_title(cls, v: Optional[str]) -> Optional[str]:
+        if v:
+            return bleach.clean(v, tags=[], strip=True)
+        return v
+
+    @field_validator("tags")
+    @classmethod
+    def sanitize_tags(cls, v: Optional[list[str]]) -> Optional[list[str]]:
+        if v:
+            return [bleach.clean(tag, tags=[], strip=True) for tag in v]
+        return v
 
 
 # ───────────────────────────
@@ -947,6 +997,15 @@ async def v1_system_health(
     return get_system_health()
 
 
+@v1_router.get("/analytics/summary", summary="Aggregated analytics summary")
+async def v1_analytics_summary(
+    days: int = QueryParam(default=7, le=30),
+    current_user: dict = Depends(require_permission("manage_users")),
+):
+    """Get aggregated metrics for the admin dashboard."""
+    return get_analytics_summary(days=days)
+
+
 @v1_router.get("/analytics/export", summary="Export analytics as CSV")
 async def v1_analytics_export(
     days: int = QueryParam(default=30, le=365),
@@ -1110,37 +1169,61 @@ async def v1_list_documents(
     role: Optional[str] = QueryParam(None, description="Filter by role"),
     limit: int = QueryParam(50, description="Max documents to return"),
     sort: str = QueryParam("recent", description="Sort order"),
+    db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
     """List all documents in the vector store with optional filtering."""
     try:
-        docs = getattr(vector_store, "documents", [])
+        # Prefer database for managed documents
+        db_docs = db.query(Document).all()
         
-        # Filter by role
-        if role:
-            docs = [d for d in docs if role in d.get("role_access", ["viewer", "seller", "admin"])]
+        # Merge with vector store documents if any (e.g. static ones)
+        vs_docs = getattr(vector_store, "documents", [])
+        
+        # Use a dict to merge by filename/doc_id
+        merged = {}
+        
+        # 1. Add DB docs
+        for d in db_docs:
+            merged[d.filename] = {
+                "id": d.id,
+                "filename": d.filename,
+                "type": d.file_type,
+                "file_size": d.file_size,
+                "version": d.version,
+                "uploaded_by": d.uploaded_by,
+                "created_at": d.created_at.isoformat() if d.created_at else None,
+                "updated_at": d.updated_at.isoformat() if d.updated_at else None,
+            }
             
-        # Format map for frontend compatibility
-        formatted_docs = []
-        for i, d in enumerate(docs):
-            formatted_docs.append({
-                "id": d.get("doc_id", str(i)),
-                "filename": d.get("source", "Unknown Document"),
-                "type": "PDF" if d.get("is_pdf") else "SPEC",
-                "pages": d.get("metadata", {}).get("pages", 1) if isinstance(d.get("metadata"), dict) else 1,
-                "created_at": d.get("created_at", "2026-04-01T10:00:00Z"),
-                "file_size": len(d.get("content", "")),
-                "upload_date": d.get("created_at", "2026-04-01T10:00:00Z"),
-            })
+        # 2. Add VS docs if not already present
+        for i, d in enumerate(vs_docs):
+            fname = d.get("source", f"vs_{i}")
+            if fname not in merged:
+                merged[fname] = {
+                    "id": d.get("doc_id", str(i)),
+                    "filename": fname,
+                    "type": "PDF" if d.get("is_pdf") else "SPEC",
+                    "file_size": len(d.get("content", "")),
+                    "version": "1",
+                    "uploaded_by": "System",
+                    "created_at": d.get("created_at", "2026-04-01T10:00:00Z"),
+                }
 
+        docs_list = list(merged.values())
+        
+        # Filter by role (if needed - currently we don't have per-doc RBAC in DB yet)
+        # For now, just return all if admin/engineer
+        
         # Sort
         if sort == "recent":
-            formatted_docs.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+            docs_list.sort(key=lambda x: x.get("created_at", "") or "", reverse=True)
             
         # Limit
-        formatted_docs = formatted_docs[:limit]
+        total = len(docs_list)
+        docs_list = docs_list[:limit]
         
-        return {"documents": formatted_docs, "total": len(docs)}
+        return {"documents": docs_list, "total": total}
     except Exception as e:
         logger.warning(f"Failed to list documents: {e}")
         return {"documents": [], "total": 0}
@@ -1167,28 +1250,57 @@ async def v1_get_document(
 @v1_router.delete("/documents/{doc_id}", summary="Delete a document")
 async def v1_delete_document(
     doc_id: str,
+    db: Session = Depends(get_db),
     current_user: dict = Depends(require_permission("manage_users")),
 ):
-    """Delete a document from the vector store."""
+    """Delete a document from both the database and the vector store."""
     try:
-        deleted = vector_store.delete_document(doc_id) if hasattr(vector_store, "delete_document") else False
-        if not deleted:
-            raise HTTPException(status_code=404, detail="Document not found")
+        # 1. Delete from Database
+        doc = db.query(Document).filter(Document.id == doc_id).first()
+        db_deleted = False
+        if doc:
+            # Also delete physical file if it exists
+            if doc.file_path and os.path.exists(doc.file_path):
+                try:
+                    os.remove(doc.file_path)
+                except Exception as e:
+                    logger.warning(f"Failed to delete physical file {doc.file_path}: {e}")
+            
+            # Delete associated versions
+            db.query(DocumentVersion).filter(DocumentVersion.document_id == doc_id).delete()
+            
+            db.delete(doc)
+            db.commit()
+            db_deleted = True
+            logger.info(f"Deleted document {doc_id} from database")
+
+        # 2. Delete from Vector Store
+        vs_deleted = vector_store.delete_document(doc_id) if hasattr(vector_store, "delete_document") else False
+        
+        # Fallback: if doc_id was a filename, try that too
+        if not vs_deleted and doc:
+            vs_deleted = vector_store.delete_document(doc.filename) if hasattr(vector_store, "delete_document") else False
+
+        if not db_deleted and not vs_deleted:
+            raise HTTPException(status_code=404, detail="Document not found in database or vector store")
+
         audit.log("document_deleted", current_user["username"], metadata={"doc_id": doc_id})
-        return {"message": f"Document {doc_id} deleted", "id": doc_id}
+        return {"message": f"Document {doc_id} deleted successfully", "id": doc_id}
     except HTTPException:
         raise
     except Exception as e:
+        db.rollback()
         logger.error(f"Failed to delete document {doc_id}: {e}")
-        raise HTTPException(status_code=500, detail="Failed to delete document")
+        raise HTTPException(status_code=500, detail=f"Failed to delete document: {str(e)}")
 
 
 @v1_router.post("/documents/upload", summary="Upload a document")
 async def v1_upload_document(
     request: Request,
+    db: Session = Depends(get_db),
     current_user: dict = Depends(require_permission("manage_users")),
 ):
-    """Upload and ingest a document into the vector store."""
+    """Upload and ingest a document into the vector store with versioning."""
     form = await request.form()
     file = form.get("file")
     if file is None:
@@ -1205,19 +1317,195 @@ async def v1_upload_document(
 
     try:
         content = await file.read()
+        content_hash = hashlib.sha256(content).hexdigest()
+        
+        # Check if document already exists by filename
+        doc = db.query(Document).filter(Document.filename == filename).first()
+        if not doc:
+            doc = Document(
+                filename=filename,
+                file_type=ext.replace(".", "").upper(),
+                file_size=str(len(content)),
+                uploaded_by=current_user["username"],
+                version="1"
+            )
+            db.add(doc)
+            db.flush() # Get doc.id
+            version_num = 1
+        else:
+            # Increment version
+            version_num = int(doc.version) + 1
+            doc.version = str(version_num)
+            doc.file_size = str(len(content))
+            doc.updated_at = datetime.now(timezone.utc)
+        
+        # Save file to disk for version tracking
+        # Ensure directory exists in workspace
+        upload_dir = os.path.join(os.path.dirname(__file__), "data", "uploads", "versions")
+        os.makedirs(upload_dir, exist_ok=True)
+        file_path = os.path.join(upload_dir, f"{doc.id}_v{version_num}{ext}")
+        with open(file_path, "wb") as f:
+            f.write(content)
+        
+        doc.file_path = file_path
+        
+        # Create version record
+        doc_version = DocumentVersion(
+            document_id=doc.id,
+            version_number=version_num,
+            content_hash=content_hash,
+            file_path=file_path,
+            created_by=current_user["username"]
+        )
+        db.add(doc_version)
+        db.commit()
+
         # Delegate to vector store ingestion if available
         if hasattr(vector_store, "ingest_document"):
-            doc_id = vector_store.ingest_document(filename, content)
-        else:
-            doc_id = filename
+            vector_store.ingest_document(filename, content)
 
         audit.log("document_uploaded", current_user["username"], metadata={
-            "filename": filename, "size_bytes": len(content),
+            "filename": filename, "size_bytes": len(content), "version": version_num
         })
-        return {"message": "Document uploaded successfully", "id": doc_id, "filename": filename}
+        return {"message": "Document uploaded successfully", "id": doc.id, "version": version_num}
     except Exception as e:
+        db.rollback()
         logger.error(f"Document upload failed: {e}")
         raise HTTPException(status_code=500, detail="Failed to process uploaded document")
+
+
+@v1_router.get("/documents/{doc_id}/versions", summary="List document versions")
+async def v1_list_document_versions(
+    doc_id: str,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """List all versions of a specific document."""
+    versions = db.query(DocumentVersion).filter(DocumentVersion.document_id == doc_id).order_by(DocumentVersion.version_number.desc()).all()
+    # Format for JSON
+    formatted = []
+    for v in versions:
+        formatted.append({
+            "id": v.id,
+            "version_number": v.version_number,
+            "created_at": v.created_at.isoformat() if v.created_at else None,
+            "created_by": v.created_by,
+            "hash": v.content_hash[:8] if v.content_hash else "N/A"
+        })
+    return {"versions": formatted}
+
+
+@v1_router.post("/documents/{doc_id}/restore/{version_number}", summary="Restore document version")
+async def v1_restore_document_version(
+    doc_id: str,
+    version_number: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(require_permission("manage_users")),
+):
+    """Restore a document to a specific version."""
+    doc = db.query(Document).filter(Document.id == doc_id).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    
+    version = db.query(DocumentVersion).filter(
+        DocumentVersion.document_id == doc_id,
+        DocumentVersion.version_number == version_number
+    ).first()
+    
+    if not version:
+        raise HTTPException(status_code=404, detail="Version not found")
+    
+    # Update main document to point to this version's file/metadata
+    doc.version = str(version_number)
+    doc.file_path = version.file_path
+    db.commit()
+    
+    # Re-ingest the version content into vector store to reflect changes in RAG
+    if os.path.exists(version.file_path) and hasattr(vector_store, "ingest_document"):
+        with open(version.file_path, "rb") as f:
+            content = f.read()
+            vector_store.ingest_document(doc.filename, content)
+    
+    audit.log("document_restored", current_user["username"], metadata={
+        "doc_id": doc_id, "version": version_number
+    })
+    return {"message": f"Document restored to version {version_number}", "id": doc_id}
+
+
+@v1_router.get("/documents/{doc_id}/content", summary="Get active document content")
+async def v1_get_document_content(
+    doc_id: str,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Retrieve the text content of the active version of a document (DB or VS)."""
+    logger.info(f"Retrieving content for doc_id: {doc_id}")
+    
+    # 1. Try Database lookup first
+    doc = db.query(Document).filter(Document.id == doc_id).first()
+    
+    if doc:
+        if not doc.file_path:
+            logger.warning(f"Document {doc_id} has no file_path recorded")
+            raise HTTPException(status_code=404, detail="No file path associated with this document")
+        
+        if not os.path.exists(doc.file_path):
+            logger.warning(f"Physical file missing for doc {doc_id}: {doc.file_path}. Attempting VectorStore fallback...")
+            
+            # Try to recover content from VectorStore (merging chunks if necessary)
+            vs_doc = vector_store.get_document(doc_id) or vector_store.get_document(doc.filename)
+            
+            if vs_doc and vs_doc.get("content"):
+                logger.info(f"Successfully recovered content from VectorStore for {doc.filename}")
+                return {
+                    "content": vs_doc["content"], 
+                    "filename": doc.filename,
+                    "note": "Recovered from vector store (original file missing)"
+                }
+                
+            # If fallback fails, raise descriptive error
+            logger.error(f"Recovery failed for doc {doc_id}")
+            is_temp = "Temp" in doc.file_path or "tmp" in doc.file_path.lower()
+            detail = f"Physical file missing: {os.path.basename(doc.file_path)}"
+            if is_temp:
+                detail = f"Document '{doc.filename}' was stored in temporary storage and has been cleared by the system. Please re-upload it."
+            raise HTTPException(status_code=404, detail=detail)
+        
+        try:
+            # Simple text extraction based on extension
+            ext = doc.filename.split('.')[-1].lower()
+            if ext == 'txt':
+                with open(doc.file_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+            elif ext == 'pdf':
+                import fitz  # pymupdf
+                doc_pdf = fitz.open(doc.file_path)
+                content = "".join([page.get_text() for page in doc_pdf])
+                doc_pdf.close()
+            elif ext in ['docx', 'doc']:
+                import docx
+                doc_word = docx.Document(doc.file_path)
+                content = "\n".join([p.text for p in doc_word.paragraphs])
+            else:
+                # Fallback to reading as bytes and decode
+                with open(doc.file_path, "rb") as f:
+                    content = f.read().decode('utf-8', errors='ignore')
+            
+            return {"content": content, "filename": doc.filename}
+        except Exception as e:
+            logger.error(f"Failed to read database document content for {doc_id}: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to read document content: {str(e)}")
+
+    # 2. Fallback to Vector Store for hardcoded/system docs
+    vs_doc = vector_store.get_document(doc_id)
+    if vs_doc:
+        return {
+            "content": vs_doc.get("content", ""),
+            "filename": vs_doc.get("filename", "System Document")
+        }
+    
+    logger.warning(f"Document not found in DB or VS: {doc_id}")
+    raise HTTPException(status_code=404, detail="Document not found")
 
 
 
@@ -1282,6 +1570,13 @@ class EvalRequest(BaseModel):
     output_tokens: int = 0
     latency_seconds: float = 0.0
 
+    @field_validator("query", "response", "reference")
+    @classmethod
+    def sanitize_strings(cls, v: Optional[str]) -> Optional[str]:
+        if v:
+            return bleach.clean(v, tags=[], strip=True)
+        return v
+
 @v1_router.post("/evaluate", summary="Evaluate a RAG response")
 async def v1_evaluate(
     body: EvalRequest,
@@ -1336,6 +1631,13 @@ async def v1_review_queue(
 class ReviewActionRequest(BaseModel):
     action: str = Field(..., pattern="^(approve|reject|edit)$")
     edited_response: Optional[str] = None
+
+    @field_validator("action", "edited_response")
+    @classmethod
+    def sanitize_strings(cls, v: Optional[str]) -> Optional[str]:
+        if v:
+            return bleach.clean(v, tags=[], strip=True)
+        return v
 
 
 @v1_router.patch("/admin/review/{item_id}", summary="Approve/reject/edit a flagged query")
@@ -1455,6 +1757,13 @@ class FeedbackRequest(BaseModel):
     rating: int = Field(..., ge=1, le=5)
     comment: Optional[str] = None
 
+    @field_validator("query", "response", "comment")
+    @classmethod
+    def sanitize_strings(cls, v: Optional[str]) -> Optional[str]:
+        if v:
+            return bleach.clean(v, tags=[], strip=True)
+        return v
+
 @v1_router.post("/query/feedback", summary="Submit user feedback")
 async def v1_submit_feedback(
     body: FeedbackRequest,
@@ -1483,6 +1792,18 @@ class GoldenAnswerRequest(BaseModel):
     expected_answer: str
     relevant_chunk_ids: Optional[list[str]] = None
     tags: Optional[list[str]] = None
+
+    @field_validator("query", "expected_answer")
+    @classmethod
+    def sanitize_strings(cls, v: str) -> str:
+        return bleach.clean(v, tags=[], strip=True)
+
+    @field_validator("tags")
+    @classmethod
+    def sanitize_tags(cls, v: Optional[list[str]]) -> Optional[list[str]]:
+        if v:
+            return [bleach.clean(tag, tags=[], strip=True) for tag in v]
+        return v
 
 @v1_router.post("/admin/golden-answers", summary="Add a golden answer")
 async def v1_add_golden_answer(

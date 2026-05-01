@@ -32,8 +32,8 @@ services:
     environment:
       DATABASE_URL: postgresql://pagani:pagani_secret@postgres:5432/pagani
       GEMINI_API_KEY: ${GEMINI_API_KEY}
-      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-pagani-zonda-r-enterprise-secret-key-2024}
-      JWT_REFRESH_SECRET_KEY: ${JWT_REFRESH_SECRET_KEY:-pagani-zonda-r-refresh-secret-key-2024}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      JWT_REFRESH_SECRET_KEY: ${JWT_REFRESH_SECRET_KEY}
       LOG_LEVEL: INFO
     depends_on:
       postgres:
