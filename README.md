@@ -14,6 +14,7 @@
 | Feature | Description |
 |---------|-------------|
 | 🤖 **Multi-Modal RAG** | AI assistant with PyMuPDF image extraction, semantic chunking, dynamic metadata filtering, and LLM-Reranking (Cross-Encoder) |
+| 🧠 **Multi-Agent Orchestration** | Advanced agentic execution with specialized sub-agents breaking down complex queries |
 | 🔐 **JWT Authentication** | Secure login with access/refresh token rotation and role-based access (Admin, Engineer, Viewer) |
 | 🎬 **Cinematic Ignition** | Video-based intro experience with Framer Motion animations |
 | 📊 **Admin Dashboard** | Executive-style dashboard with system metrics and AI query interface |
@@ -22,8 +23,9 @@
 | 🎯 **Role-Based Data** | Documents filtered by user role — admins see financials, engineers see technical specs |
 | 💾 **Database Persistence** | SQLAlchemy ORM with PostgreSQL/SQLite for users, chat history, system logs, and analytics |
 | 🛡️ **Security Hardening** | Security headers, rate limiting, request size limits, input sanitization, CORS |
-| 📝 **Structured Logging** | Rotating file logs + DB persistence for all system events |
-| 📈 **Analytics Tracking** | Non-invasive usage analytics for chat, login, and system events |
+| 📝 **Structured Logging & Audit** | Rotating file logs + DB persistence for all system events, and full security auditing |
+| 📈 **Analytics & Evaluation** | Non-invasive usage analytics for chat, login, system events, and built-in Evaluator Engine for IR metrics |
+| 🚀 **WebSockets/SSE** | Real-time streaming and bidirectional communication for pipeline state and chat responses |
 | 🐳 **Docker Ready** | docker-compose with frontend, backend, and PostgreSQL services |
 
 ---
@@ -36,31 +38,45 @@ graph TB
         A[Ignition Experience] --> B[Auth Pages]
         B --> C[Dashboards]
         C --> D[Chat Assistant]
-        D --> E["lib/api.ts<br/>Fetch + Auth + Sanitize"]
+        C --> RP[RAG Debug Panel]
+        D --> E["lib/api.ts (Fetch + Auth)"]
+        RP --> E
     end
 
     subgraph Backend["FastAPI Backend"]
-        F[Auth Endpoints] --> G[JWT + bcrypt]
+        F[Auth & RBAC] --> G[JWT + bcrypt]
         H[Chat Endpoints] --> I[Agentic Router]
         I --> J[FAISS Hybrid Search]
-        J --> K[Gemini LLM]
-        L[Health Monitor]
+        J --> K[Gemini LLM / Multi-Agent]
+        L[Health & System Monitor]
+        
+        M[Analytics & Audit]
+        N[WebSockets / SSE Manager]
+        O[Evaluator Engine]
+        P[Cache Manager]
     end
 
     subgraph Data["Data Layer"]
-        M[(PostgreSQL/SQLite)]
-        N[(FAISS Vector Index)]
-        O[Gemini API]
+        Q[(PostgreSQL/SQLite)]
+        R[(FAISS Vector Index)]
+        S[Gemini API]
     end
 
-    E -->|HTTP/SSE| F
-    E -->|HTTP/SSE| H
-    E -->|HTTP| L
-    G --> M
+    E -->|HTTP/REST| F
+    E -->|HTTP/REST| H
+    E -->|SSE / WebSockets| N
+    E -->|HTTP/REST| L
+    
     H --> M
-    J --> N
-    K --> O
-    L --> M
+    H --> O
+    H --> P
+    H --> N
+    
+    G --> Q
+    H --> Q
+    M --> Q
+    J --> R
+    K --> S
 ```
 
 ---
@@ -72,26 +88,41 @@ sequenceDiagram
     participant U as User
     participant FE as Frontend
     participant API as FastAPI
-    participant DB as Database
+    participant Auth as Auth & Cache
+    participant Router as Agentic Router
     participant VS as Vector Store
-    participant LLM as Gemini
+    participant LLM as Multi-Agent LLM
+    participant DB as Analytics & DB
 
-    U->>FE: Enter question
+    U->>FE: Ask Question
     FE->>FE: sanitizeInput()
     FE->>API: POST /api/chat/stream
-    API->>API: Verify JWT token
-    API->>LLM: Agentic Router (needs search, metadata filters)
-    LLM-->>API: {needs_search, search_query, metadata_filters}
-    API->>VS: Initial Hybrid search (FAISS + semantic)
-    VS->>LLM: Rerank Candidate Contexts
-    LLM-->>VS: Top 5 Relevant Chunks (0-100 Score)
-    VS-->>API: Filtered + Reranked documents
-    API->>LLM: Generate with context
-    LLM-->>API: Stream tokens
-    API-->>FE: SSE stream
-    FE-->>U: Render markdown
-    API->>DB: Persist chat history
-    API->>DB: Track analytics
+    API->>Auth: Verify JWT & Check Cache
+    alt Cache Hit
+        Auth-->>API: Return Cached Answer
+    else Cache Miss
+        API->>Router: Needs Search? Extract Filters?
+        Router-->>API: {needs_search, filters, reformulated_query}
+        
+        alt Needs Search
+            API->>VS: Hybrid Search (Semantic + Keyword)
+            VS->>LLM: Rerank Candidates
+            LLM-->>VS: Scored Context Chunks
+            VS-->>API: Top N Filtered/Reranked Docs
+        end
+        
+        API->>LLM: Generate Response (Context + History)
+        LLM-->>API: Stream Tokens
+    end
+    
+    API-->>FE: SSE Stream / JSON Response
+    FE-->>U: Render Markdown
+    
+    par Async Tasks
+        API->>DB: Persist Chat History
+        API->>DB: Track Analytics & Audit Metrics
+        API->>Auth: Update Cache
+    end
 ```
 
 ---
