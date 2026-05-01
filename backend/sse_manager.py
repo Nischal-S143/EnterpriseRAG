@@ -55,7 +55,8 @@ class SSEManager:
         for q in dead_queues:
             self._channels[channel].discard(q)
 
-    async def stream(self, queue: asyncio.Queue, channel: str = "default") -> AsyncGenerator[str, None]:
+    async def stream(self, queue: asyncio.Queue,
+                     channel: str = "default") -> AsyncGenerator[str, None]:
         """
         Async generator that yields SSE-formatted strings.
         Sends heartbeat comments every `heartbeat_interval` seconds.

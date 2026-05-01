@@ -3,6 +3,7 @@ from unittest.mock import patch, MagicMock, AsyncMock
 import asyncio
 from multi_agent import RetrieverAgent, SynthesisAgent, run_multi_agent, run_single_agent
 
+
 @pytest.mark.asyncio
 async def test_retriever_agent_deduplication():
     agent = RetrieverAgent()
@@ -17,6 +18,7 @@ async def test_retriever_agent_deduplication():
     assert len(new_state["retrieved_docs"]) == 2
     assert new_state["retrieved_docs"][0]["chunk_id"] == "1"
 
+
 @pytest.mark.asyncio
 async def test_synthesis_agent_success():
     agent = SynthesisAgent()
@@ -24,7 +26,7 @@ async def test_synthesis_agent_success():
         "query": "test?",
         "retrieved_docs": [{"content": "info", "source": "src1"}]
     }
-    
+
     async def mock_stream():
         yield MagicMock(choices=[MagicMock(delta=MagicMock(content="Final answer"))])
 
@@ -32,12 +34,13 @@ async def test_synthesis_agent_success():
         new_state = await agent.execute(state)
         assert "Final answer" in new_state["final_response"]
 
+
 @pytest.mark.asyncio
 async def test_run_multi_agent():
     sse_queue = asyncio.Queue()
     state_meta = {"format": "standard"}
     chunks = [{"content": "info", "source": "src1", "score": 90.0}]
-    
+
     async def mock_stream():
         yield MagicMock(choices=[MagicMock(delta=MagicMock(content="Final answer"))])
 
@@ -46,11 +49,12 @@ async def test_run_multi_agent():
         assert "Final answer" in result["final_response"]
         assert len(result["retrieved_docs"]) == 1
 
+
 @pytest.mark.asyncio
 async def test_run_single_agent():
     sse_queue = asyncio.Queue()
     chunks = [{"content": "info", "source": "src1"}]
-    
+
     async def mock_stream():
         yield MagicMock(choices=[MagicMock(delta=MagicMock(content="Single answer"))])
 

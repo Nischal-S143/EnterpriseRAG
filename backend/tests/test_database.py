@@ -1,6 +1,6 @@
-import pytest
 from database import get_db, engine
 from sqlalchemy.orm import Session
+
 
 def test_get_db_yields_session():
     db_gen = get_db()
@@ -13,6 +13,7 @@ def test_get_db_yields_session():
             next(db_gen)
         except StopIteration:
             pass
+
 
 def test_engine_initialization():
     assert engine is not None

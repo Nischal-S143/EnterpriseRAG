@@ -1,6 +1,6 @@
-import pytest
-from unittest.mock import patch, MagicMock, AsyncMock
+from unittest.mock import patch
 from fastapi import status
+
 
 @patch("rag_pipeline.Planner.plan")
 @patch("rag_pipeline.ToolExecution.execute")
@@ -12,18 +12,19 @@ def test_chat_sse_success(mock_single, mock_route, mock_exec, mock_plan, test_cl
     mock_exec.return_value = [{"content": "context", "source": "src1", "score": 90.0}]
     mock_route.return_value = {"decision": "single_agent", "confidence": 0.9}
     mock_single.return_value = {"final_response": "Mocked AI answer"}
-    
+
     response = test_client.post(
         "/api/v1/chat/sse",
         json={"question": "What is the Zonda R?", "format": "default"},
         headers=auth_headers
     )
-    
+
     assert response.status_code == status.HTTP_200_OK
     assert "text/event-stream" in response.headers["content-type"]
     # Verify events are emitted
     assert "Mocked AI answer" in response.text
     assert "event: done" in response.text
+
 
 def test_chat_unauthorized(test_client):
     """Test that chat endpoint requires authentication."""
@@ -32,6 +33,7 @@ def test_chat_unauthorized(test_client):
         json={"question": "Unauthorized query"}
     )
     assert response.status_code == status.HTTP_401_UNAUTHORIZED
+
 
 def test_chat_empty_query(test_client, auth_headers):
     """Test chat with empty query."""
@@ -43,11 +45,12 @@ def test_chat_empty_query(test_client, auth_headers):
     # Pydantic validation (min_length=3 in ChatRequest)
     assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
 
+
 @patch("rag_pipeline.Planner.plan")
 def test_chat_error_handling(mock_plan, test_client, auth_headers):
     """Test chat behavior when pipeline raises an exception."""
     mock_plan.side_effect = Exception("Pipeline crash")
-    
+
     response = test_client.post(
         "/api/v1/chat/sse",
         json={"question": "Crash me"},

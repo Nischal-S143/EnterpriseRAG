@@ -85,8 +85,19 @@ interface ChatAssistantProps {
 
 // ── Simple Markdown Renderer ──
 function renderMarkdown(text: string): string {
-    return text
-        // Code blocks (```...```)
+    // 1. Sanitize/Escape the raw text first to prevent XSS in dangerouslySetInnerHTML
+    let sanitized = text
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+
+    // 2. Apply markdown transformations on the sanitized text
+    return sanitized
+        // Code blocks (```...```) - Note: we use &lt;/&gt; now so we match those if needed, 
+        // but usually code blocks are handled before escaping or we adjust regex.
+        // Let's keep it simple: markdown symbols aren't escaped, only HTML tags.
         .replace(/```(\w*)\n([\s\S]*?)```/g, '<pre class="bg-black/40 rounded-lg p-3 my-2 overflow-x-auto text-xs"><code>$2</code></pre>')
         // Inline code (`...`)
         .replace(/`([^`]+)`/g, '<code class="bg-white/10 px-1.5 py-0.5 rounded text-pagani-gold text-xs">$1</code>')
@@ -546,6 +557,7 @@ export default function ChatAssistant({ isOpen, onClose }: ChatAssistantProps) {
                             </div>
                             <button
                                 onClick={onClose}
+                                aria-label="Close assistant"
                                 className="text-gray-500 hover:text-pagani-gold transition-colors p-1"
                             >
                                 <svg

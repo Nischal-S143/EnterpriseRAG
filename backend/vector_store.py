@@ -13,6 +13,7 @@ import faiss
 import google.generativeai as genai
 from openai import OpenAI
 import threading
+from datetime import datetime, timezone
 try:
     from rank_bm25 import BM25Okapi
 except ImportError:
@@ -28,7 +29,8 @@ EMBEDDING_MODEL = "models/gemini-embedding-001"
 
 # ── Groq Configuration (for LLM reranking) ──
 api_key = os.getenv("GROQ_API_KEY", "dummy_key")
-client = OpenAI(base_url="https://api.groq.com/openai/v1", api_key=api_key, timeout=15.0, max_retries=1)
+client = OpenAI(base_url="https://api.groq.com/openai/v1",
+                api_key=api_key, timeout=15.0, max_retries=1)
 
 # ── Persistence Paths ──
 INDEX_PATH = os.path.join(os.path.dirname(__file__), "faiss_index.bin")
@@ -128,7 +130,7 @@ class VectorStore:
                 self.embeddings = meta["embeddings"]
                 self.dimension = meta["dimension"]
                 self.documents = meta["documents"]
-                
+
                 # Load BM25 if exists
                 bm25_path = os.path.join(os.path.dirname(__file__), "bm25_index.pkl")
                 if os.path.exists(bm25_path):
@@ -143,9 +145,11 @@ class VectorStore:
                             heading = doc.get("heading_path", "")
                             tokenized_corpus.append(self._tokenize(f"{heading} {text}".strip()))
                         self.bm25_index = BM25Okapi(tokenized_corpus)
-                        
+
                 self._initialized = True
-                logger.info(f"Loaded FAISS index: {self.index.ntotal} vectors, dim={self.dimension}")
+                logger.info(
+                    f"Loaded FAISS index: {self.index.ntotal}"
+                    f" vectors, dim={self.dimension}")
                 return
             except Exception as e:
                 logger.warning(f"Failed to load persisted index, rebuilding: {e}")
@@ -161,26 +165,30 @@ class VectorStore:
             if not (os.path.exists(INDEX_PATH) and os.path.exists(META_PATH)):
                 # If the PDF dataset folder isn't even present (e.g., on Render deployment),
                 # do not attempt to ingest anything to save Gemini Quota and prevent crashes.
-                pdf_dir = os.path.join(os.path.dirname(__file__), "..", "pagani_intelligence_rich_dataset_25_pdfs")
+                pdf_dir = os.path.join(
+                    os.path.dirname(__file__),
+                    "..",
+                    "pagani_intelligence_rich_dataset_25_pdfs")
                 if not os.path.exists(pdf_dir):
                     return False
                 return True
             self.initialize()
-            
+
         return not any(doc.get("is_pdf") for doc in self.documents)
 
     def ingest_pdf_chunks(self, chunks: list[dict]):
         """Add new PDF chunks to the vector store and rebuild the index."""
         if not chunks:
             return
-            
+
         logger.info(f"Ingesting {len(chunks)} PDF chunks into vector store...")
         self.documents.extend(chunks)
-        
+
         # We need to rebuild the entire index because adding to flat index dynamically
         # with new embeddings is possible, but _build_index() is cleaner and rebuilds embeddings
-        # Wait, embedding everything every time is slow. Let's just embed the new chunks and add them.
-        
+        # Wait, embedding everything every time is slow. Let's just embed the new
+        # chunks and add them.
+
         if self.embeddings is None or self.index is None:
             self._build_index()
         else:
@@ -191,23 +199,23 @@ class VectorStore:
                 base_text = doc.get("content", doc.get("text", ""))
                 heading = doc.get("heading_path", "")
                 keywords = " ".join(doc.get("metadata", {}).get("keywords", []))
-                
+
                 context_fused = base_text
                 if heading or keywords:
                     context_fused = f"Heading: {heading}\nKeywords: {keywords}\n\n{base_text}"
                 new_texts.append(context_fused)
-                
+
             new_embeddings = self._embed_texts(new_texts)
-            
+
             # Normalize new embeddings
             faiss.normalize_L2(new_embeddings)
-            
+
             # Append to embeddings array
             self.embeddings = np.vstack((self.embeddings, new_embeddings))
-            
+
             # Add to FAISS index
             self.index.add(new_embeddings)
-            
+
             # Rebuild BM25 for the entire corpus Incorporating Headers
             if BM25Okapi is not None:
                 tokenized_corpus = []
@@ -216,7 +224,7 @@ class VectorStore:
                     heading = doc.get("heading_path", "")
                     tokenized_corpus.append(self._tokenize(f"{heading} {text}".strip()))
                 self.bm25_index = BM25Okapi(tokenized_corpus)
-                
+
             self._persist()
             logger.info(f"FAISS index updated: {self.index.ntotal} vectors total")
 
@@ -249,7 +257,7 @@ class VectorStore:
         chunks = []
         chunk_size = 2000
         for i in range(0, len(text), chunk_size):
-            chunk_text = text[i:i+chunk_size]
+            chunk_text = text[i:i + chunk_size]
             chunks.append({
                 "content": chunk_text,
                 "role_access": ["admin", "engineer", "viewer"],
@@ -259,10 +267,10 @@ class VectorStore:
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "metadata": {"chunk": i // chunk_size, "filename": filename}
             })
-        
+
         self.ingest_pdf_chunks(chunks)
         return filename
-            
+
     def _embed_texts(self, texts: list[str]) -> np.ndarray:
         """Embed a list of texts using Gemini text-embedding-004."""
         logger.info(f"Embedding {len(texts)} texts via Gemini API sequentially...")
@@ -286,12 +294,12 @@ class VectorStore:
                 except Exception as e:
                     if "429" in str(e) and attempt < 4:
                         wait = (attempt + 1) * 3
-                        logger.warning(f"Rate limited on doc {i+1}. Retrying in {wait}s...")
+                        logger.warning(f"Rate limited on doc {i + 1}. Retrying in {wait}s...")
                         time.sleep(wait)
                     else:
-                        logger.error(f"Embedding generation failed on doc {i+1}: {e}")
+                        logger.error(f"Embedding generation failed on doc {i + 1}: {e}")
                         raise RuntimeError(f"Failed to generate embeddings: {e}")
-                        
+
         embeddings = np.vstack(all_embeddings) if len(all_embeddings) > 1 else all_embeddings[0]
         logger.info(f"Embedded {len(texts)} total texts, shape: {embeddings.shape}")
         return embeddings
@@ -313,22 +321,22 @@ class VectorStore:
     def _build_index(self):
         """Build FAISS index from documents and persist to disk."""
         logger.info("Building FAISS index from scratch...")
-        
+
         # Ensure documents are initialized
         if not self.documents:
             self.documents = PAGANI_DOCUMENTS
-            
+
         texts_to_embed = []
         for doc in self.documents:
             base_text = doc.get("content", doc.get("text", ""))
             heading = doc.get("heading_path", "")
             keywords = " ".join(doc.get("metadata", {}).get("keywords", []))
-            
+
             context_fused = base_text
             if heading or keywords:
                 context_fused = f"Heading: {heading}\nKeywords: {keywords}\n\n{base_text}"
             texts_to_embed.append(context_fused)
-            
+
         self.embeddings = self._embed_texts(texts_to_embed)
 
         # Dynamic dimension detection
@@ -357,7 +365,7 @@ class VectorStore:
                     "documents": self.documents,
                 }, f)
             logger.info("FAISS index persisted to disk.")
-            
+
             # Rebuild and persist BM25 index over the entire synchronized corpus
             if BM25Okapi is not None:
                 tokenized_corpus = []
@@ -372,7 +380,7 @@ class VectorStore:
                 logger.info(f"BM25 index rebuilt and persisted for {len(self.documents)} chunks.")
             else:
                 logger.warning("rank_bm25 is not installed. Skipping BM25 index generation.")
-            
+
         except Exception as e:
             logger.error(f"Failed to persist indexes: {e}")
 
@@ -391,21 +399,21 @@ class VectorStore:
         query_tokens = set(self._tokenize(query))
         if not query_tokens:
             return []
-            
+
         results = []
         for i, doc in enumerate(self.documents):
             if user_role not in doc.get("role_access", ["viewer", "seller", "admin"]):
                 continue
-                
+
             doc_tokens = self._tokenize(doc["content"])
             # Calculate simple TF score based on token overlap
             score = 0
             for token in query_tokens:
                 score += doc_tokens.count(token)
-            
+
             if score > 0:
                 results.append({"idx": i, "score": score, "doc": doc})
-                
+
         results.sort(key=lambda x: x["score"], reverse=True)
         return results[:top_k]
 
@@ -416,18 +424,17 @@ class VectorStore:
         confidence = max(0.0, 1.0 - (float(faiss_distance) / 1.25))
         return confidence * 100.0
 
-
     def _llm_rerank(self, query: str, candidates: list[dict], top_k: int) -> list[dict]:
         try:
             prompt = f"Given the user query: '{query}'\n\n"
             prompt += "Score each document chunk based on its direct relevance to the query. "
             prompt += "Use a scale of 0 to 100 (0=Irrelevant, 50=Partial Match, 100=Perfect Answer).\n"
             prompt += "Return ONLY a JSON array of integers, where the i-th integer is the score for [Chunk i].\n\n"
-            
+
             for i, cand in enumerate(candidates):
                 content = cand['doc']['content'][:600].replace('\n', ' ')
                 prompt += f"[Chunk {i}]: {content}...\n\n"
-                
+
             for attempt in range(2):
                 try:
                     response = client.chat.completions.create(
@@ -436,14 +443,14 @@ class VectorStore:
                     )
                     text = response.choices[0].message.content.strip()
                     logger.debug(f"LLM Rerank Raw Response: {text}")
-                    
+
                     # Robust parsing: Extract digits from the response if it's not a clean JSON
                     import re
                     scores = []
-                    
+
                     if "[" in text and "]" in text:
                         # Try to extract the array part
-                        array_str = text[text.find("[") : text.rfind("]") + 1]
+                        array_str = text[text.find("["):text.rfind("]") + 1]
                         try:
                             scores = json.loads(array_str)
                         except Exception:
@@ -452,50 +459,56 @@ class VectorStore:
                     else:
                         # Fallback try to find any numbers
                         scores = [int(s) for s in re.findall(r"\d+", text)]
-                        
+
                     if len(scores) < len(candidates):
-                        logger.warning(f"Reranker returned {len(scores)} scores for {len(candidates)} candidates. Padding...")
+                        logger.warning(
+                            f"Reranker returned {len(scores)} scores"
+                            f" for {len(candidates)} candidates."
+                            " Padding...")
                         scores.extend([0] * (len(candidates) - len(scores)))
-                        
+
                     # Map scores back to candidates
                     for cand, score in zip(candidates, scores):
                         llm_score = float(score)
-                        # Safety fallback: if LLM returns < 10 but semantic distance is low, use semantic boost
+                        # Safety fallback: if LLM returns < 10 but semantic distance is low, use
+                        # semantic boost
                         if llm_score < 10.0 and cand.get('dist', 2.0) < 0.8:
                             semantic_boost = max(0.0, 1.0 - (cand.get('dist', 2.0) / 1.2)) * 100.0
                             cand['score'] = max(llm_score, semantic_boost)
                         else:
                             cand['score'] = llm_score
-                        
+
                     # Sort and log
                     candidates.sort(key=lambda x: x['score'], reverse=True)
                     top_scores = [c['score'] for c in candidates[:5]]
                     logger.info(f"LLM Reranking (Success). Top scores: {top_scores}")
                     return candidates[:top_k]
-                    
+
                 except Exception as e:
                     if attempt == 0:
                         logger.warning(f"Reranking attempt 1 failed: {e}. Retrying...")
                         continue
                     raise e
-            
+
         except Exception as e:
             logger.error(f"LLM Reranking failed completely: {e}")
             # Fallback to Semantic scores scaled to 0-100
             for cand in candidates:
                 cand['score'] = self._get_semantic_score(cand['score'])
-            
+
             candidates.sort(key=lambda x: x['score'], reverse=True)
             top_scores = [round(c['score'], 1) for c in candidates[:5]]
             logger.info(f"Reranking Fallback (Semantic). Top scores: {top_scores}")
             return candidates[:top_k]
-    def search(self, query: str, top_k: int = 5, user_role: str = "viewer", filters: dict = None) -> list[dict]:
+
+    def search(self, query: str, top_k: int = 5, user_role: str = "viewer",
+               filters: dict = None) -> list[dict]:
         """
         Semantic search with Gen-2 features: Role filtering, Metadata filters, and LLM Reranking.
         """
         if not self._initialized:
             self.initialize()
-            
+
         search_k = min(20, self.index.ntotal)
 
         # --- 1. Semantic Search (FAISS) ---
@@ -511,11 +524,11 @@ class VectorStore:
             if idx == -1:
                 continue
             doc = self.documents[idx]
-            
+
             # 1a. Filter by Role
             if user_role not in doc.get("role_access", ["viewer", "seller", "admin"]):
                 continue
-                
+
             # 1b. Filter by Metadata (if any)
             if filters:
                 match = True
@@ -530,28 +543,28 @@ class VectorStore:
 
         # --- 2. Keyword Search ---
         keyword_results = self._keyword_search(query, user_role, search_k)
-        
+
         # --- 3. Reciprocal Rank Fusion (RRF) ---
         # k = 60 is standard in RRF
         rrf_k = 60
         fused_scores = {}
-        
+
         # Rank semantic results
         for rank, res in enumerate(semantic_results):
             fused_scores[res["idx"]] = fused_scores.get(res["idx"], 0) + 1.0 / (rrf_k + rank + 1)
-            
+
         # Rank keyword results
         for rank, res in enumerate(keyword_results):
             fused_scores[res["idx"]] = fused_scores.get(res["idx"], 0) + 1.0 / (rrf_k + rank + 1)
-            
+
         # Sort by fused score
         fused_results = sorted(list(fused_scores.items()), key=lambda x: x[1], reverse=True)
-        
+
         # Build candidate list for reranking
         candidates = []
         for idx, _ in fused_results[:search_k]:
             candidates.append({"idx": idx, "doc": self.documents[idx], "score": 0.0})
-            
+
         # --- 4. LLM Cross-Encoder Reranking ---
         reranked_results = self._llm_rerank(query, candidates, top_k=top_k)
 
@@ -573,7 +586,8 @@ class VectorStore:
         )
         return final_results
 
-    def search_with_debug(self, query: str, top_k: int = 5, user_role: str = "viewer", filters: dict = None) -> dict:
+    def search_with_debug(self, query: str, top_k: int = 5,
+                          user_role: str = "viewer", filters: dict = None) -> dict:
         """
         Debug-enhanced search that returns results + full pipeline trace.
         Does NOT modify the core search logic — wraps the same calls with timing.
@@ -738,7 +752,10 @@ class VectorStore:
 
     def _find_pdf_path(self, source_name: str) -> str | None:
         """Find the PDF file path for a given document source name."""
-        pdf_dir = os.path.join(os.path.dirname(__file__), "..", "pagani_intelligence_rich_dataset_25_pdfs")
+        pdf_dir = os.path.join(
+            os.path.dirname(__file__),
+            "..",
+            "pagani_intelligence_rich_dataset_25_pdfs")
         if not os.path.exists(pdf_dir):
             return None
 
@@ -768,7 +785,7 @@ class VectorStore:
         """Remove a document and its vectors from the store."""
         if not self._initialized:
             self.initialize()
-            
+
         with self._lock:
             # 1. Find indices of chunks for this doc
             indices_to_remove = []
@@ -779,14 +796,14 @@ class VectorStore:
                     indices_to_remove.append(i)
                 else:
                     new_docs.append(doc)
-            
+
             if not indices_to_remove:
                 logger.warning(f"No chunks found in VectorStore for doc_id: {doc_id}")
                 return False
-                
+
             # 2. Update documents list
             self.documents = new_docs
-            
+
             # 3. Update FAISS index
             if self.embeddings is not None and len(self.embeddings) > 0:
                 # Remove from embeddings array using boolean mask
@@ -795,7 +812,7 @@ class VectorStore:
                 valid_indices = [idx for idx in indices_to_remove if idx < len(mask)]
                 mask[valid_indices] = False
                 self.embeddings = self.embeddings[mask]
-                
+
                 # Rebuild FAISS index from remaining embeddings
                 if len(self.embeddings) > 0:
                     self.index = faiss.IndexFlatIP(self.dimension)
@@ -807,7 +824,7 @@ class VectorStore:
                 else:
                     self.index = None
                     self.embeddings = None
-            
+
             # 4. Rebuild BM25
             if BM25Okapi is not None and self.documents:
                 tokenized_corpus = []
@@ -818,10 +835,12 @@ class VectorStore:
                 self.bm25_index = BM25Okapi(tokenized_corpus)
             else:
                 self.bm25_index = None
-                
+
             # 5. Persist the updated state
             self._persist()
-            logger.info(f"Deleted document {doc_id} from vector store ({len(indices_to_remove)} chunks removed)")
+            logger.info(
+                f"Deleted document {doc_id} from vector store"
+                f" ({len(indices_to_remove)} chunks removed)")
             return True
 
     def get_document(self, doc_id: str) -> dict | None:
@@ -864,6 +883,7 @@ class VectorStore:
             "upload_date": "2026-04-01T10:00:00Z",
             "pdf_filename": pdf_filename,
         }
+
 
 def embed_query(query: str) -> np.ndarray:
     """Standalone query embedding using Gemini (for use by other modules)."""

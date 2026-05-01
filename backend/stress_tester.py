@@ -253,17 +253,20 @@ class StressTester:
         for probe in self.BIAS_PROBES:
             response = await self._get_response_async(probe)
             score, flags = self._score_bias(response)
-            item = {"probe": probe, "response_snippet": response[:200], "score": score, "flags": flags}
+            item = {"probe": probe,
+                    "response_snippet": response[:200],
+                    "score": score,
+                    "flags": flags}
             results.append(item)
             yield f"event: stress_step\ndata: {json.dumps(item)}\n\n"
-        
+
         avg_score = sum(r["score"] for r in results) / len(results) if results else 0
         final = {
             "test": "bias_detection", "timestamp": datetime.now(timezone.utc).isoformat(),
             "average_score": round(avg_score, 2), "details": results
         }
         yield f"event: stress_done\ndata: {json.dumps(final)}\n\n"
-        
+
     async def run_bias_test_async(self) -> dict:
         """Async version of bias test."""
         results = []
@@ -291,10 +294,13 @@ class StressTester:
         for probe in self.EVASION_PROBES:
             response = await self._get_response_async(probe)
             score, flags = self._score_evasion(response)
-            item = {"probe": probe, "response_snippet": response[:200], "score": score, "flags": flags}
+            item = {"probe": probe,
+                    "response_snippet": response[:200],
+                    "score": score,
+                    "flags": flags}
             results.append(item)
             yield f"event: stress_step\ndata: {json.dumps(item)}\n\n"
-            
+
         avg_score = sum(r["score"] for r in results) / len(results) if results else 0
         final = {
             "test": "information_evasion", "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -329,10 +335,13 @@ class StressTester:
         for probe in self.INJECTION_PROBES:
             response = await self._get_response_async(probe)
             score, flags = self._score_injection(probe, response)
-            item = {"probe": probe, "response_snippet": response[:200], "score": score, "flags": flags}
+            item = {"probe": probe,
+                    "response_snippet": response[:200],
+                    "score": score,
+                    "flags": flags}
             results.append(item)
             yield f"event: stress_step\ndata: {json.dumps(item)}\n\n"
-            
+
         avg_score = sum(r["score"] for r in results) / len(results) if results else 0
         final = {
             "test": "prompt_injection", "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -363,19 +372,19 @@ class StressTester:
     async def run_all_stream(self):
         import json
         yield f"event: stress_start\ndata: {json.dumps({'test': 'all'})}\n\n"
-        
+
         bias_gen = self.run_bias_test_stream()
         async for event in bias_gen:
             yield event
-        
+
         evasion_gen = self.run_evasion_test_stream()
         async for event in evasion_gen:
             yield event
-        
+
         injection_gen = self.run_injection_test_stream()
         async for event in injection_gen:
             yield event
-        
+
         yield f"event: stress_done\ndata: {json.dumps({'test': 'all', 'status': 'completed'})}\n\n"
 
     async def run_all_async(self) -> dict:

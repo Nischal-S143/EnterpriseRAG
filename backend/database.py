@@ -62,6 +62,7 @@ def get_db_session():
     finally:
         db.close()
 
+
 @contextmanager
 def get_db_read():
     """Context manager for read-only actions (never commits)."""

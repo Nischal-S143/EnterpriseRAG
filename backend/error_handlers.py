@@ -33,6 +33,7 @@ def generate_trace_id() -> str:
 
 class AppError(Exception):
     """Base application error with error code and status code."""
+
     def __init__(
         self,
         message: str = "An unexpected error occurred.",
@@ -49,6 +50,7 @@ class AppError(Exception):
 
 class RAGPipelineError(AppError):
     """Error in the RAG pipeline (embedding, search, generation)."""
+
     def __init__(self, message: str = "RAG pipeline error.", details: dict | None = None):
         super().__init__(
             message=message,
@@ -60,6 +62,7 @@ class RAGPipelineError(AppError):
 
 class AuthorizationError(AppError):
     """User lacks required permissions."""
+
     def __init__(self, message: str = "Insufficient permissions.", details: dict | None = None):
         super().__init__(
             message=message,
@@ -71,6 +74,7 @@ class AuthorizationError(AppError):
 
 class DocumentProcessingError(AppError):
     """Error during document upload/processing."""
+
     def __init__(self, message: str = "Document processing failed.", details: dict | None = None):
         super().__init__(
             message=message,
@@ -82,6 +86,7 @@ class DocumentProcessingError(AppError):
 
 class ValidationError(AppError):
     """Input validation error."""
+
     def __init__(self, message: str = "Validation failed.", details: dict | None = None):
         super().__init__(
             message=message,
@@ -93,6 +98,7 @@ class ValidationError(AppError):
 
 class ResourceNotFoundError(AppError):
     """Requested resource not found."""
+
     def __init__(self, message: str = "Resource not found.", details: dict | None = None):
         super().__init__(
             message=message,

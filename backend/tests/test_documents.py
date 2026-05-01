@@ -1,23 +1,24 @@
-import pytest
 from fastapi import status
 from unittest.mock import patch, MagicMock
 import io
+
 
 @patch("main.vector_store")
 def test_upload_document_admin(mock_vs, test_client, auth_headers):
     """Test that an admin can upload a document."""
     file_content = b"This is a test document about the Pagani Zonda R."
     file = io.BytesIO(file_content)
-    
+
     response = test_client.post(
         "/api/v1/documents/upload",
         files={"file": ("test.txt", file, "text/plain")},
         headers=auth_headers
     )
-    
+
     # The endpoint returns 200 OK by default
     assert response.status_code == status.HTTP_200_OK
     assert "uploaded successfully" in response.json()["message"].lower()
+
 
 def test_upload_document_viewer_denied(test_client, viewer_headers):
     """Test that a viewer cannot upload documents."""
@@ -30,6 +31,7 @@ def test_upload_document_viewer_denied(test_client, viewer_headers):
     # viewers don't have manage_users permission required for upload
     assert response.status_code == status.HTTP_403_FORBIDDEN
 
+
 def test_list_documents(test_client, auth_headers):
     """Test listing documents."""
     response = test_client.get("/api/v1/documents", headers=auth_headers)
@@ -37,17 +39,19 @@ def test_list_documents(test_client, auth_headers):
     data = response.json()
     assert "documents" in data or isinstance(data, list)
 
+
 @patch("main.vector_store")
 def test_delete_document_admin(mock_vs, test_client, auth_headers):
     """Test deleting a document as admin."""
     mock_vs.delete_document.return_value = True
-    
+
     response = test_client.delete(
         "/api/v1/documents/test_doc_id",
         headers=auth_headers
     )
     assert response.status_code == status.HTTP_200_OK
     assert "deleted" in response.json()["message"].lower()
+
 
 def test_delete_document_viewer_denied(test_client, viewer_headers):
     """Test that a viewer cannot delete documents."""
@@ -56,6 +60,7 @@ def test_delete_document_viewer_denied(test_client, viewer_headers):
         headers=viewer_headers
     )
     assert response.status_code == status.HTTP_403_FORBIDDEN
+
 
 @patch("main.vector_store")
 def test_document_versioning(mock_vs, test_client, auth_headers):

@@ -57,6 +57,7 @@ def setup_logging(level: str = "INFO"):
 # Global thread pool for fire-and-forget DB logging
 _log_executor = ThreadPoolExecutor(max_workers=2)
 
+
 def _persist_log_to_db(action: str, user_id: str | None, metadata: dict | None):
     """Internal helper to write a log event to the database (synchronous)."""
     try:
@@ -71,6 +72,7 @@ def _persist_log_to_db(action: str, user_id: str | None, metadata: dict | None):
     except Exception:
         # Avoid crashing the logger if DB is unavailable
         pass
+
 
 def log_event(
     logger_name: str,

@@ -16,8 +16,9 @@ load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
 logger = logging.getLogger("pagani.evaluator")
 
-api_key = os.getenv("GROQ_API_KEY", "dummy_key") # Groq Key 
+api_key = os.getenv("GROQ_API_KEY", "dummy_key")  # Groq Key
 client = OpenAI(base_url="https://api.groq.com/openai/v1", api_key=api_key)
+
 
 class LLMJudge:
     """Uses LLM to score a generated response against a reference or query."""
@@ -63,7 +64,8 @@ JSON Output:"""
             }
         except Exception as e:
             logger.error(f"LLMJudge scoring failed: {e}")
-            return {"relevance": 0, "faithfulness": 0, "completeness": 0, "overall": 0, "reasoning": f"Error: {e}"}
+            return {"relevance": 0, "faithfulness": 0, "completeness": 0,
+                    "overall": 0, "reasoning": f"Error: {e}"}
 
 
 class IRMetrics:
@@ -221,7 +223,7 @@ class Evaluator:
         try:
             from database import get_db_session
             from models import Evaluation
-            
+
             with get_db_session() as db:
                 eval_record = Evaluation(
                     query=result["query"],

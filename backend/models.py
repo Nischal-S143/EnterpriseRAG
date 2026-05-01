@@ -33,8 +33,14 @@ class User(Base):
     # Relationships
     chat_history = relationship("ChatHistory", back_populates="user", cascade="all, delete-orphan")
     system_logs = relationship("SystemLog", back_populates="user", cascade="all, delete-orphan")
-    analytics_events = relationship("AnalyticsEvent", back_populates="user", cascade="all, delete-orphan")
-    analytics_sessions = relationship("AnalyticsSession", back_populates="user", cascade="all, delete-orphan")
+    analytics_events = relationship(
+        "AnalyticsEvent",
+        back_populates="user",
+        cascade="all, delete-orphan")
+    analytics_sessions = relationship(
+        "AnalyticsSession",
+        back_populates="user",
+        cascade="all, delete-orphan")
 
     def __repr__(self):
         return f"<User(name='{self.name}', role='{self.role}')>"

@@ -105,8 +105,8 @@ This starts PostgreSQL, the backend, and frontend together.
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `GEMINI_API_KEY` | Yes | — | Google Gemini API key |
-| `JWT_SECRET_KEY` | Yes | `pagani-default-secret` | JWT signing secret |
-| `JWT_REFRESH_SECRET_KEY` | Yes | `pagani-refresh-secret` | Refresh token secret |
+| `JWT_SECRET_KEY` | Yes | — | JWT signing secret |
+| `JWT_REFRESH_SECRET_KEY` | Yes | — | Refresh token secret |
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | No | `30` | Access token lifetime |
 | `REFRESH_TOKEN_EXPIRE_DAYS` | No | `7` | Refresh token lifetime |
 | `DATABASE_URL` | No | `sqlite:///pagani.db` | Database connection URL |

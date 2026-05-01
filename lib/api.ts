@@ -12,14 +12,21 @@ const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || defaultUrl;
 
 // ── Input Sanitization ──
 
-/**
- * Sanitize user input before sending to the backend.
- * Strips HTML tags, limits length, and trims whitespace.
- */
 export function sanitizeInput(input: string, maxLength: number = 2000): string {
+    if (!input) return "";
+    
     return input
-        .replace(/<[^>]*>/g, "")  // Strip HTML tags
-        .replace(/[<>]/g, "")     // Remove remaining angle brackets
+        .replace(/<[^>]+>/g, "") // Strip HTML tags (requires closing >)
+        .replace(/[<>"'&]/g, (char) => {
+            const entities: Record<string, string> = {
+                "<": "&lt;",
+                ">": "&gt;",
+                "\"": "&quot;",
+                "'": "&#039;",
+                "&": "&amp;"
+            };
+            return entities[char] || char;
+        })
         .trim()
         .slice(0, maxLength);
 }

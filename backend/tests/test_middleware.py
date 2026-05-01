@@ -1,16 +1,17 @@
-import pytest
 from fastapi import status
 from main import app
+
 
 def test_security_headers_present(test_client):
     """Verify that SecurityHeadersMiddleware adds mandatory headers."""
     response = test_client.get("/api/health")
     headers = response.headers
-    
+
     assert headers["X-Content-Type-Options"] == "nosniff"
     assert headers["X-Frame-Options"] == "DENY"
     assert "Strict-Transport-Security" in headers
     assert "Content-Security-Policy" in headers
+
 
 def test_cors_headers_present(test_client):
     """Verify that CORS headers are present for allowed origins."""
@@ -24,9 +25,10 @@ def test_cors_headers_present(test_client):
     assert response.status_code == status.HTTP_200_OK
     assert response.headers["access-control-allow-origin"] == "http://localhost:3000"
 
+
 def test_rate_limiting_trigger(test_client):
     """
-    Test rate limiting. 
+    Test rate limiting.
     Note: Limiter is disabled in conftest's test_client, so we enable it for this test.
     """
     app.state.limiter.enabled = True
@@ -41,16 +43,17 @@ def test_rate_limiting_trigger(test_client):
             # If we didn't hit 429 after 50 attempts, either limit is high or not working
             # But we'll assert 429 to fail the test if not reached
             # (In a real scenario, we'd mock the limiter or use a specific test route)
-            pass 
-        
-        # This is a bit non-deterministic depending on actual limits, 
+            pass
+
+        # This is a bit non-deterministic depending on actual limits,
         # so we just ensure we CAN get a 429 if we spam enough.
         # For the purpose of this task, we will just verify headers and CORS.
     finally:
         app.state.limiter.enabled = False
 
+
 def test_request_size_limit(test_client):
     """Verify that RequestSizeLimitMiddleware rejects oversized bodies."""
-    oversized_body = "a" * (2 * 1024 * 1024) # 2MB
+    oversized_body = "a" * (2 * 1024 * 1024)  # 2MB
     response = test_client.post("/api/login", data=oversized_body)
     assert response.status_code == status.HTTP_413_REQUEST_ENTITY_TOO_LARGE

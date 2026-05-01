@@ -17,7 +17,7 @@ load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 logger = logging.getLogger("pagani.rag_pipeline")
 
 # ── API Setup ──
-api_key = os.getenv("GROQ_API_KEY", "dummy_key") # Groq Key
+api_key = os.getenv("GROQ_API_KEY", "dummy_key")  # Groq Key
 client = AsyncOpenAI(base_url="https://api.groq.com/openai/v1", api_key=api_key)
 
 GENERATION_MODEL = "llama-3.3-70b-versatile"
@@ -27,21 +27,25 @@ GENERATION_MODEL = "llama-3.3-70b-versatile"
 chat_sessions: dict[str, list[dict]] = {}
 MAX_SESSION_TURNS = 5  # Keep last 5 Q&A pairs (10 messages total)
 
+
 def _get_history(username: str) -> list[dict]:
     return chat_sessions.get(username, [])
-    
+
+
 def _add_to_history(username: str, question: str, answer: str):
     if username not in chat_sessions:
         chat_sessions[username] = []
-    
+
     chat_sessions[username].append({"role": "user", "content": question})
     chat_sessions[username].append({"role": "model", "content": answer})
-    
+
     # Truncate
     if len(chat_sessions[username]) > MAX_SESSION_TURNS * 2:
         chat_sessions[username] = chat_sessions[username][-MAX_SESSION_TURNS * 2:]
 
-async def _gemini_call_with_retry(model_name, messages, stream=False, max_retries=5, response_format=None):
+
+async def _gemini_call_with_retry(model_name, messages, stream=False,
+                                  max_retries=5, response_format=None):
     """Helper with robust exponential back-off for 429 Quota Exceeded errors."""
     for attempt in range(max_retries):
         try:
@@ -54,7 +58,9 @@ async def _gemini_call_with_retry(model_name, messages, stream=False, max_retrie
             if "429" in err_msg:
                 if attempt < max_retries - 1:
                     wait_time = (attempt + 1) * 3
-                    logger.warning(f"429 Rate Limit. Retrying in {wait_time}s... (Attempt {attempt+1}/{max_retries})")
+                    logger.warning(
+                        f"429 Rate Limit. Retrying in {wait_time}s..."
+                        f" (Attempt {attempt + 1}/{max_retries})")
                     await asyncio.sleep(wait_time)
                     continue
             raise e
@@ -125,8 +131,6 @@ Answer: The Huayra features four independently controlled active aerodynamic fla
 """
 
 
-
-
 ROUTER_PROMPT = """You are an intelligent query routing agent for Pagani Automobili.
 Your job is to read the user's new question and the recent chat history, then decide TWO things:
 1. Does this question require factual data from the enterprise knowledge base?
@@ -134,11 +138,11 @@ Your job is to read the user's new question and the recent chat history, then de
 3. Extract any specific metadata filters (like 'model': 'Zonda', 'model': 'Huayra', 'model': 'Utopia').
 
 Output exactly a JSON object in this format:
-{
+{{
   "needs_search": true or false,
   "search_query": "The optimized query here",
-  "metadata_filters": {"model": "Zonda"} // only output keys if specifically requested, else omit or {}
-}
+  "metadata_filters": {{"model": "Zonda"}} // only output keys if specifically requested, else omit or {{}}
+}}
 
 CHAT HISTORY:
 {history}
@@ -173,6 +177,7 @@ def _build_prompt(
         question=question,
     )
 
+
 async def agentic_router(question: str, history: list[dict]) -> dict:
     """
     Decide if a vector search is needed and reformulate the query.
@@ -181,14 +186,21 @@ async def agentic_router(question: str, history: list[dict]) -> dict:
     try:
         history_text = _build_history_text(history)
         system_instruction = ROUTER_PROMPT.format(history=history_text)
-        
+
         messages = [
             {"role": "system", "content": system_instruction},
             {"role": "user", "content": question}
         ]
         response = await _gemini_call_with_retry(GENERATION_MODEL, messages, response_format=True)
-        result = json.loads(response.choices[0].message.content)
-        
+        content = response.choices[0].message.content.strip()
+        # Robust parsing for potential markdown formatting
+        if "```json" in content:
+            content = content.split("```json")[1].split("```")[0].strip()
+        elif "```" in content:
+            content = content.split("```")[1].split("```")[0].strip()
+
+        result = json.loads(content)
+
         logger.info(f"Router Decision: {result}")
         return result
     except Exception as e:
@@ -224,7 +236,7 @@ async def generate_response(
             context_docs, user_role, history,
             question=question, template=output_format,
         )
-        
+
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": question}
@@ -271,12 +283,12 @@ async def generate_response_stream(
         start_time = time.time()
         history = _get_history(username)
         system_prompt = _build_prompt(context_docs, user_role, history)
-        
+
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": question}
         ]
-        
+
         response_stream = await _gemini_call_with_retry(GENERATION_MODEL, messages, stream=True)
 
         full_answer = ""
@@ -302,13 +314,14 @@ async def generate_response_stream(
 # Planner System
 # ═══════════════════════════════════════════
 
-PLANNER_PROMPT = """Analyze query, respond JSON only: 
+PLANNER_PROMPT = """Analyze query, respond JSON only:
 {{"strategy":"simple|multi_hop|comparative",
 "sub_queries":["q1","q2"],
 "needs_table":true|false,
 "needs_code":true|false,
 "complexity":"low|medium|high"}}
 Query: {question}"""
+
 
 class Planner:
     def __init__(self, model_name: str = GENERATION_MODEL):
@@ -317,12 +330,12 @@ class Planner:
     async def plan(self, question: str, sse_queue: asyncio.Queue = None) -> dict:
         start_time = time.time()
         prompt = PLANNER_PROMPT.format(question=question)
-        
+
         try:
             messages = [{"role": "user", "content": prompt}]
             response = await _gemini_call_with_retry(self.model_name, messages, response_format=True)
             result = json.loads(response.choices[0].message.content)
-            
+
             # Defaults
             if "strategy" not in result:
                 result["strategy"] = "simple"
@@ -334,7 +347,7 @@ class Planner:
                 result["needs_table"] = False
             if "needs_code" not in result:
                 result["needs_code"] = False
-                
+
         except Exception as e:
             logger.warning(f"Planner failed, defaulting to simple: {e}")
             result = {
@@ -344,9 +357,9 @@ class Planner:
                 "needs_code": False,
                 "complexity": "low"
             }
-            
+
         duration = int((time.time() - start_time) * 1000)
-        
+
         if sse_queue:
             await sse_queue.put({
                 "event": "planner",
@@ -357,17 +370,19 @@ class Planner:
                     "duration_ms": duration
                 }
             })
-            
+
         return result
+
 
 class ToolExecution:
     """
     Hybrid Search Tool with RRF, Multi-hop, Comparative and HyDE boosting.
     """
+
     def __init__(self, vector_store, sse_queue: asyncio.Queue = None):
         self.vector_store = vector_store
         self.sse_queue = sse_queue
-        
+
         # Integration with live VectorStore
         # self.bm25_index and self.chunks will be retrieved from self.vector_store dynamically
         pass
@@ -387,10 +402,11 @@ class ToolExecution:
         norm = np.linalg.norm(v1) * np.linalg.norm(v2)
         return float(dot / norm) if norm > 0 else 0.0
 
-    async def _hyde_boost(self, query_emb: np.ndarray, chunks: list[dict]) -> tuple[list[dict], int]:
+    async def _hyde_boost(self, query_emb: np.ndarray,
+                          chunks: list[dict]) -> tuple[list[dict], int]:
         if query_emb is None:
             return chunks, 0
-        
+
         boosted_count = 0
         for chunk in chunks:
             max_sim = 0.0
@@ -403,17 +419,18 @@ class ToolExecution:
                         max_sim = sim
                 except Exception:
                     pass
-                
+
             if max_sim > 0.75:
                 chunk["score"] = chunk.get("score", 0.0) + 0.15
                 chunk["hyde_boosted"] = True
                 boosted_count += 1
-                
+
         # Re-sort
         chunks.sort(key=lambda x: x.get("score", 0.0), reverse=True)
         return chunks, boosted_count
 
-    async def _emit_retrieval(self, tool_name: str, sub_query: str, chunks_found: int, top_score: float, duration: int):
+    async def _emit_retrieval(self, tool_name: str, sub_query: str,
+                              chunks_found: int, top_score: float, duration: int):
         if self.sse_queue:
             await self.sse_queue.put({
                 "event": "retrieval",
@@ -426,10 +443,11 @@ class ToolExecution:
                 }
             })
 
-    async def simple_search(self, query: str, top_k: int = 5, needs_table: bool = False, needs_code: bool = False) -> list[dict]:
+    async def simple_search(self, query: str, top_k: int = 5,
+                            needs_table: bool = False, needs_code: bool = False) -> list[dict]:
         """FAISS dense + BM25 sparse -> RRF fusion"""
         start_time = time.time()
-        
+
         # 1. FAISS Dense search
         # Requires vector_store to be active. If not, fallback empty.
         dense_results = []
@@ -439,65 +457,66 @@ class ToolExecution:
                 faiss_emb = query_emb.reshape(1, -1)
                 import faiss
                 faiss.normalize_L2(faiss_emb)
-                
+
                 search_k = min(self.vector_store.index.ntotal, 50)
                 scores, indices = self.vector_store.index.search(faiss_emb, search_k)
-                
+
                 for idx, sc in zip(indices[0], scores[0]):
                     if idx != -1 and idx < len(self.vector_store.documents):
                         dense_results.append((self.vector_store.documents[idx], float(sc)))
-                        
+
         # 2. BM25 Sparse search
         sparse_results = []
         # Use live data from vector_store
         bm25_index = getattr(self.vector_store, 'bm25_index', None)
         chunks = getattr(self.vector_store, 'documents', [])
-        
+
         if bm25_index and chunks:
             import re
             tokens = re.findall(r'\b\w+\b', query.lower())
             bm25_scores = bm25_index.get_scores(tokens)
-            
+
             for idx, sc in enumerate(bm25_scores):
                 if sc > 0 and idx < len(chunks):
                     sparse_results.append((chunks[idx], float(sc)))
-                    
+
         # Sort sparse descending before RRF
         sparse_results.sort(key=lambda x: x[1], reverse=True)
-        
+
         # 3. RRF Fusion
         rrf_scores = {}
         for rank, (doc, _) in enumerate(dense_results):
             # Try to uniquely identify chunk
             cid = doc.get("chunk_id", doc.get("content", "")[:50])
-            rrf_scores[cid] = {"doc": doc, "score": rrf_scores.get(cid, {}).get("score", 0.0) + (1.0 / (60 + rank + 1))}
-            
+            rrf_scores[cid] = {"doc": doc, "score": rrf_scores.get(
+                cid, {}).get("score", 0.0) + (1.0 / (60 + rank + 1))}
+
         for rank, (doc, _) in enumerate(sparse_results):
             cid = doc.get("chunk_id", doc.get("content", "")[:50])
             if cid not in rrf_scores:
                 rrf_scores[cid] = {"doc": doc, "score": 0.0}
             rrf_scores[cid]["score"] += (1.0 / (60 + rank + 1))
-            
+
         final_list = []
         for v in rrf_scores.values():
             doc = dict(v["doc"])
             doc["score"] = v["score"]
-            
+
             # Type filtering boosts
             ctype = doc.get("chunk_type", "")
             if needs_table and ctype in ["table", "table_row"]:
                 doc["score"] += 0.20
             if needs_code and ctype == "code":
                 doc["score"] += 0.20
-            
+
             final_list.append(doc)
-            
+
         final_list.sort(key=lambda x: x["score"], reverse=True)
         top_results = final_list[:top_k]
-        
+
         duration = int((time.time() - start_time) * 1000)
         top_sc = top_results[0]["score"] if top_results else 0.0
-        
+
         await self._emit_retrieval("simple_search", query, len(top_results), top_sc, duration)
         return top_results
 
@@ -507,12 +526,12 @@ class ToolExecution:
         needs_table = plan.get("needs_table", False)
         needs_code = plan.get("needs_code", False)
         top_k = 5
-        
+
         all_chunks = []
-        
+
         if strategy == "simple":
             all_chunks = await self.simple_search(query, top_k, needs_table, needs_code)
-            
+
         elif strategy == "multi_hop":
             start_time = time.time()
             dedup = {}
@@ -523,13 +542,13 @@ class ToolExecution:
                     cid = c.get("chunk_id", c.get("content", "")[:50])
                     if cid not in dedup or c["score"] > dedup[cid]["score"]:
                         dedup[cid] = c
-            
+
             fused = list(dedup.values())
             fused.sort(key=lambda x: x["score"], reverse=True)
             all_chunks = fused[:top_k]
-            
+
             await self._emit_retrieval("multi_hop_search", "ALL", len(all_chunks), all_chunks[0]["score"] if all_chunks else 0, int((time.time() - start_time) * 1000))
-            
+
         elif strategy == "comparative":
             start_time = time.time()
             dedup = {}
@@ -541,15 +560,15 @@ class ToolExecution:
                     src_tag = f"[{c.get('source', c.get('doc_id', 'Unknown Source'))}]"
                     if "source_tag" not in c:
                         c["source_tag"] = src_tag
-                        
+
                     if cid not in dedup or c["score"] > dedup[cid]["score"]:
                         dedup[cid] = c
-            
+
             # Sort by doc_id to group them, then by score
             fused = list(dedup.values())
             fused.sort(key=lambda x: (x.get("doc_id", ""), x.get("score", 0.0)), reverse=True)
-            all_chunks = fused[:top_k+2] # Comparative can use slightly more context
-            
+            all_chunks = fused[:top_k + 2]  # Comparative can use slightly more context
+
             await self._emit_retrieval("comparative_search", "ALL", len(all_chunks), all_chunks[0]["score"] if all_chunks else 0, int((time.time() - start_time) * 1000))
 
         else:
@@ -558,7 +577,7 @@ class ToolExecution:
         # Apply HyDE Boost based on original query
         query_emb = await self._embed_query(query)
         boosted_chunks, b_count = await self._hyde_boost(query_emb, all_chunks)
-        
+
         if self.sse_queue and b_count > 0:
             await self.sse_queue.put({
                 "event": "retrieval",
@@ -568,7 +587,7 @@ class ToolExecution:
                     "boost_applied": 0.15
                 }
             })
-            
+
         # Format the final chunks list for frontend payload
         if self.sse_queue and boosted_chunks:
             preview_chunks = []
@@ -583,18 +602,20 @@ class ToolExecution:
                     "text_preview": c.get("text", c.get("content", ""))[:120],
                     "keywords": meta.get("keywords", [])[:3]
                 })
-                
+
             await self.sse_queue.put({
                 "event": "chunks",
                 "data": {"chunks": preview_chunks}
             })
-            
+
         return boosted_chunks
+
 
 class ConditionalRouter:
     """
     Evaluates retrieval confidence and routes to specific agents or human review.
     """
+
     def __init__(self, sse_queue: asyncio.Queue = None):
         self.sse_queue = sse_queue
 
@@ -605,11 +626,11 @@ class ConditionalRouter:
             # avg of top-3 chunk scores
             top3 = [c.get("score", 0.0) for c in chunks[:3]]
             confidence = sum(top3) / len(top3)
-            
+
         # Confidence normalization: the LLM reranker returns scores from 0-100.
         # We normalize this to a 0.0-1.0 scale for thresholding.
         norm_conf = float(confidence) / 100.0
-        
+
         if norm_conf >= 0.35:
             decision = "single_agent"
             reason = f"Good confidence ({norm_conf:.2f} >= 0.35) using fast-path responder."
@@ -619,7 +640,7 @@ class ConditionalRouter:
         else:
             decision = "human_validation"
             reason = f"No relevant context found (confidence {norm_conf:.2f})."
-            
+
         if self.sse_queue:
             await self.sse_queue.put({
                 "event": "router",
@@ -629,7 +650,7 @@ class ConditionalRouter:
                     "reason": reason
                 }
             })
-            
+
         return {
             "decision": decision,
             "confidence": round(norm_conf, 3)

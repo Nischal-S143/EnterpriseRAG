@@ -3,7 +3,6 @@ Integration tests for V1 Enterprise API endpoints.
 """
 
 
-
 class TestHealthEndpoints:
     """Test health check endpoints."""
 

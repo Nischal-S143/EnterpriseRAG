@@ -39,10 +39,11 @@ export default function AdminPage() {
     const [adminKey, setAdminKey] = useState("");
     const [gatePassed, setGatePassed] = useState(false);
     const [activeTab, setActiveTab] = useState("Roles");
-    const TABS = ["Roles", "Review Queue", "Reports", "Audit Logs"];
+    const TABS = ["Roles", "Metrics", "Review Queue", "Reports", "Audit Logs", "Documents"];
 
     const [users, setUsers] = useState<UserObj[]>([]);
     const [rolesAudit, setRolesAudit] = useState<any[]>([]);
+    const [summary, setSummary] = useState<any>(null);
 
     const [reviewItems, setReviewItems] = useState<ReviewItem[]>([]);
     const [editingItemId, setEditingItemId] = useState<string | null>(null);
@@ -51,6 +52,15 @@ export default function AdminPage() {
     const [auditLogs, setAuditLogs] = useState<any[]>([]);
     const [reports, setReports] = useState<any[]>([]);
     const [isGeneratingReport, setIsGeneratingReport] = useState(false);
+
+    // Document Management State
+    const [documents, setDocuments] = useState<any[]>([]);
+    const [selectedDocVersions, setSelectedDocVersions] = useState<any[]>([]);
+    const [viewingDocId, setViewingDocId] = useState<string | null>(null);
+    const [isUploading, setIsUploading] = useState(false);
+    const [isPreviewOpen, setIsPreviewOpen] = useState(false);
+    const [previewContent, setPreviewContent] = useState<any>(null);
+    const [isFetchingPreview, setIsFetchingPreview] = useState(false);
 
 
 
@@ -106,7 +116,18 @@ export default function AdminPage() {
     };
 
     useEffect(() => {
-        if (activeTab === "Review Queue" && gatePassed) {
+        if (activeTab === "Metrics" && gatePassed) {
+            (async () => {
+                try {
+                    const data = await apiFetch<any>("/api/v1/analytics/summary", {
+                        headers: { "X-Admin-Key": ADMIN_KEY }
+                    });
+                    setSummary(data);
+                } catch (err: any) {
+                    console.error("Failed to fetch analytics summary:", err);
+                }
+            })();
+        } else if (activeTab === "Review Queue" && gatePassed) {
             (async () => {
                 try {
                     const data = await apiFetch<{ review_queue: ReviewItem[] }>("/api/v1/admin/review-queue", {
@@ -139,8 +160,105 @@ export default function AdminPage() {
                     console.error("Failed to fetch audit logs:", err);
                 }
             })();
+        } else if (activeTab === "Documents" && gatePassed) {
+            fetchDocuments();
         }
     }, [activeTab, gatePassed]);
+
+    const fetchDocuments = async () => {
+        try {
+            const data = await apiFetch<{ documents: any[] }>("/api/v1/documents");
+            setDocuments(data.documents || []);
+        } catch (err) {
+            console.error("Failed to fetch documents:", err);
+        }
+    };
+
+    const fetchVersions = async (docId: string) => {
+        try {
+            const data = await apiFetch<{ versions: any[] }>(`/api/v1/documents/${docId}/versions`);
+            setSelectedDocVersions(data.versions || []);
+            setViewingDocId(docId);
+        } catch (err) {
+            console.error("Failed to fetch versions:", err);
+        }
+    };
+
+    const handleRestore = async (docId: string, versionNum: number) => {
+        if (!confirm(`Are you sure you want to restore document to version ${versionNum}?`)) return;
+        try {
+            await apiFetch(`/api/v1/documents/${docId}/restore/${versionNum}`, { method: "POST" });
+            alert("Restored successfully!");
+            fetchDocuments();
+            setViewingDocId(null);
+        } catch (err) {
+            console.error("Restore failed:", err);
+            alert("Restore failed.");
+        }
+    };
+
+    const handleDelete = async (docId: string, filename: string) => {
+        if (!confirm(`Are you sure you want to permanently delete "${filename}"? This will remove all versions from the database and the vector store.`)) {
+            return;
+        }
+
+        try {
+            await apiFetch(`/api/v1/documents/${docId}`, {
+                method: "DELETE"
+            });
+            alert("Document deleted successfully");
+            fetchDocuments();
+        } catch (err: any) {
+            console.error("Delete failed:", err);
+            alert(`Failed to delete document: ${err.message}`);
+        }
+    };
+
+    const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+
+        setIsUploading(true);
+        const formData = new FormData();
+        formData.append("file", file);
+
+        try {
+            // Use standard fetch here because apiFetch forces JSON content-type
+            const token = localStorage.getItem("pagani_access_token");
+            const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || ""}/api/v1/documents/upload`, {
+                method: "POST",
+                headers: {
+                    "Authorization": `Bearer ${token}`
+                },
+                body: formData
+            });
+
+            if (!res.ok) throw new Error("Upload failed");
+            
+            alert("Uploaded successfully!");
+            fetchDocuments();
+        } catch (err) {
+            console.error("Upload failed:", err);
+            e.target.value = "";
+        } finally {
+            setIsUploading(false);
+            e.target.value = "";
+        }
+    };
+
+    const handlePreview = async (docId: string) => {
+        setIsFetchingPreview(true);
+        setIsPreviewOpen(true);
+        try {
+            const data = await apiFetch<any>(`/api/v1/documents/${docId}/content`);
+            setPreviewContent(data);
+        } catch (err) {
+            console.error("Preview failed:", err);
+            setPreviewContent({ content: "Failed to load document content.", filename: "Error" });
+        } finally {
+            setIsFetchingPreview(false);
+        }
+    };
 
     const handleAuth = (e: React.FormEvent) => {
         e.preventDefault();
@@ -317,6 +435,110 @@ export default function AdminPage() {
                                     </motion.div>
                                 </div>
                             </>
+                        )}
+
+                        {activeTab === "Metrics" && summary && (
+                            <motion.div variants={fadeUp} initial="hidden" animate="visible" className="space-y-8">
+                                <div className="flex justify-between items-end">
+                                    <div>
+                                        <h2 className="text-2xl font-bold font-[var(--font-orbitron)] text-pagani-gold uppercase tracking-tighter">Enterprise Metrics</h2>
+                                        <p className="text-xs text-gray-500 mt-2 uppercase tracking-widest">Real-time Pipeline Intelligence</p>
+                                    </div>
+                                    <div className="text-xs text-gray-600 uppercase">Last updated: {new Date(summary.generated_at).toLocaleTimeString()}</div>
+                                </div>
+
+                                {/* Top Stat Cards */}
+                                <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                                    <div className="bg-[#111] border border-white/10 rounded-xl p-6 shadow-2xl relative overflow-hidden group">
+                                        <div className="absolute top-0 right-0 w-16 h-16 bg-pagani-gold/5 rounded-bl-full -mr-4 -mt-4 transition-all group-hover:bg-pagani-gold/10" />
+                                        <p className="text-xs text-gray-500 uppercase tracking-widest mb-1">Avg Response (TTFT)</p>
+                                        <h3 className="text-2xl font-bold text-white font-[var(--font-orbitron)]">{summary.avg_response_time_ms}<span className="text-pagani-gold text-sm ml-1">ms</span></h3>
+                                        <div className="mt-2 text-xs text-green-500 uppercase font-bold">Stable Pipeline</div>
+                                    </div>
+                                    <div className="bg-[#111] border border-white/10 rounded-xl p-6 shadow-2xl relative overflow-hidden group">
+                                        <div className="absolute top-0 right-0 w-16 h-16 bg-red-500/5 rounded-bl-full -mr-4 -mt-4 transition-all group-hover:bg-red-500/10" />
+                                        <p className="text-xs text-gray-500 uppercase tracking-widest mb-1">Failed Query Rate</p>
+                                        <h3 className="text-2xl font-bold text-white font-[var(--font-orbitron)]">{summary.failed_query_rate}<span className="text-red-500 text-sm ml-1">%</span></h3>
+                                        <div className={`mt-2 text-xs uppercase font-bold ${summary.failed_query_rate < 5 ? 'text-green-500' : 'text-amber-500'}`}>
+                                            {summary.failed_query_rate < 5 ? 'Healthy' : 'Needs Optimization'}
+                                        </div>
+                                    </div>
+                                    <div className="bg-[#111] border border-white/10 rounded-xl p-6 shadow-2xl relative overflow-hidden group">
+                                        <div className="absolute top-0 right-0 w-16 h-16 bg-blue-500/5 rounded-bl-full -mr-4 -mt-4 transition-all group-hover:bg-blue-500/10" />
+                                        <p className="text-xs text-gray-500 uppercase tracking-widest mb-1">Avg Session</p>
+                                        <h3 className="text-2xl font-bold text-white font-[var(--font-orbitron)]">{Math.round(summary.avg_session_duration_s / 60)}<span className="text-blue-500 text-sm ml-1">min</span></h3>
+                                        <div className="mt-2 text-xs text-blue-400 uppercase font-bold">User Engagement</div>
+                                    </div>
+                                    <div className="bg-[#111] border border-white/10 rounded-xl p-6 shadow-2xl relative overflow-hidden group">
+                                        <div className="absolute top-0 right-0 w-16 h-16 bg-green-500/5 rounded-bl-full -mr-4 -mt-4 transition-all group-hover:bg-green-500/10" />
+                                        <p className="text-xs text-gray-500 uppercase tracking-widest mb-1">Active Documents</p>
+                                        <h3 className="text-2xl font-bold text-white font-[var(--font-orbitron)]">{documents.length}</h3>
+                                        <div className="mt-2 text-xs text-green-400 uppercase font-bold">Knowledge Base</div>
+                                    </div>
+                                </div>
+
+                                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                                    {/* Query Volume Chart */}
+                                    <div className="bg-[#111] border border-white/10 rounded-xl p-6 shadow-2xl">
+                                        <h3 className="text-sm font-bold text-white uppercase tracking-widest mb-6 border-b border-white/5 pb-3 flex justify-between">
+                                            Query Volume (Last 7 Days)
+                                            <span className="text-pagani-gold text-sm">Total: {summary.query_volume.reduce((a: any, b: any) => a + b.count, 0)}</span>
+                                        </h3>
+                                        <div className="h-48 flex items-end gap-2 px-2">
+                                            {summary.query_volume.map((day: any, i: number) => {
+                                                const maxCount = Math.max(...summary.query_volume.map((d: any) => d.count), 1);
+                                                const height = (day.count / maxCount) * 100;
+                                                return (
+                                                    <div key={i} className="flex-1 flex flex-col items-center gap-2 group">
+                                                        <div className="relative w-full">
+                                                            <motion.div 
+                                                                initial={{ height: 0 }}
+                                                                animate={{ height: `${height}%` }}
+                                                                className="w-full bg-pagani-gold/20 border-t border-pagani-gold/50 rounded-t-sm group-hover:bg-pagani-gold/40 transition-all relative"
+                                                            >
+                                                                <div className="absolute -top-7 left-1/2 -translate-x-1/2 opacity-0 group-hover:opacity-100 transition-opacity bg-black text-pagani-gold text-[10px] font-bold px-1.5 py-0.5 rounded border border-pagani-gold/20">
+                                                                    {day.count}
+                                                                </div>
+                                                            </motion.div>
+                                                        </div>
+                                                        <span className="text-[10px] text-gray-600 font-bold uppercase">{day.date}</span>
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                    </div>
+
+                                    {/* Top Documents */}
+                                    <div className="bg-[#111] border border-white/10 rounded-xl p-6 shadow-2xl">
+                                        <h3 className="text-sm font-bold text-white uppercase tracking-widest mb-6 border-b border-white/5 pb-3">Top 5 Documents</h3>
+                                        <div className="space-y-4">
+                                            {summary.top_documents.length === 0 ? (
+                                                <p className="text-center py-10 text-xs text-gray-600 uppercase italic">No retrieval data yet</p>
+                                            ) : (
+                                                summary.top_documents.map((doc: any, i: number) => {
+                                                    const maxCount = Math.max(...summary.top_documents.map((d: any) => d.count), 1);
+                                                    const width = (doc.count / maxCount) * 100;
+                                                    return (
+                                                        <div key={i} className="space-y-1">
+                                                            <div className="flex justify-between text-xs uppercase font-bold">
+                                                                <span className="text-white truncate max-w-[200px]">{doc.id}</span>
+                                                                <span className="text-pagani-gold">{doc.count} hits</span>
+                                                            </div>
+                                                            <div className="h-1.5 w-full bg-white/5 rounded-full overflow-hidden">
+                                                                <motion.div 
+                                                                    initial={{ width: 0 }}
+                                                                    animate={{ width: `${width}%` }}
+                                                                    className="h-full bg-pagani-gold rounded-full"
+                                                                />
+                                                            </div>
+                                                        </div>
+                                                    );
+                                                })
+                                            )}
+                                        </div>
+                                    </div>
+                                </div>
+                            </motion.div>
                         )}
 
                         {activeTab === "Review Queue" && (
@@ -498,9 +720,174 @@ export default function AdminPage() {
                                 </div>
                             </motion.div>
                         )}
+
+                        {activeTab === "Documents" && (
+                            <motion.div variants={fadeUp} initial="hidden" animate="visible" className="space-y-6">
+                                <div className="flex justify-between items-center">
+                                    <div>
+                                        <h2 className="text-2xl font-bold font-[var(--font-orbitron)] text-pagani-gold">Document Management</h2>
+                                        <p className="text-xs text-gray-500 uppercase tracking-widest">Versioned Knowledge Base</p>
+                                    </div>
+                                    <label className="bg-pagani-gold text-black px-4 py-2 rounded text-xs font-bold uppercase tracking-wider hover:bg-[#b0902c] transition-colors cursor-pointer flex items-center gap-2">
+                                        {isUploading ? (
+                                            <>
+                                                <motion.div animate={{ rotate: 360 }} transition={{ repeat: Infinity, duration: 1, ease: "linear" }} className="w-3 h-3 border border-black border-t-transparent rounded-full" />
+                                                Uploading...
+                                            </>
+                                        ) : (
+                                            <>
+                                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" y1="3" x2="12" y2="15" /></svg>
+                                                Upload New Document
+                                            </>
+                                        )}
+                                        <input type="file" className="hidden" onChange={handleFileUpload} disabled={isUploading} />
+                                    </label>
+                                </div>
+
+                                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                                    {documents.map((doc) => (
+                                        <div key={doc.id} className="bg-[#111] border border-white/10 rounded-xl p-5 hover:border-pagani-gold/40 transition-all group relative">
+                                            <div className="flex items-start justify-between mb-4">
+                                                <div className="w-10 h-10 rounded-lg bg-red-500/10 flex items-center justify-center text-red-500 border border-red-500/20">
+                                                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /></svg>
+                                                </div>
+                                                <div className="bg-pagani-gold/20 text-pagani-gold px-2 py-0.5 rounded text-[10px] font-bold">V{doc.version}</div>
+                                            </div>
+                                            <h4 className="text-sm font-bold text-white truncate mb-1" title={doc.filename}>{doc.filename}</h4>
+                                            <p className="text-[10px] text-gray-500 uppercase tracking-widest mb-4">
+                                                {doc.type} • {doc.file_size ? (Number(doc.file_size) / 1024).toFixed(1) : 0} KB
+                                            </p>
+                                            <div className="flex gap-2">
+                                                <button 
+                                                    onClick={() => fetchVersions(doc.id)}
+                                                    className="flex-1 bg-white/5 hover:bg-white/10 border border-white/10 rounded py-2 text-[10px] font-bold uppercase tracking-wider transition-colors"
+                                                >
+                                                    History
+                                                </button>
+                                                <button 
+                                                    onClick={() => handlePreview(doc.id)}
+                                                    className="bg-pagani-gold/10 hover:bg-pagani-gold/20 border border-pagani-gold/20 text-pagani-gold rounded px-3 py-2 transition-colors"
+                                                    title="Preview"
+                                                >
+                                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" /><circle cx="12" cy="12" r="3" /></svg>
+                                                </button>
+                                                <button 
+                                                    onClick={() => handleDelete(doc.id, doc.filename)}
+                                                    className="bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 text-red-500 rounded px-3 py-2 transition-colors"
+                                                    title="Delete"
+                                                >
+                                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>
+                                                </button>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </motion.div>
+                        )}
                     </div>
                 )}
             </main>
+
+            {/* Version History Modal */}
+            {viewingDocId && (
+                <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+                    <motion.div 
+                        initial={{ opacity: 0 }} animate={{ opacity: 1 }}
+                        className="absolute inset-0 bg-black/80 backdrop-blur-sm"
+                        onClick={() => setViewingDocId(null)}
+                    />
+                    <motion.div 
+                        initial={{ opacity: 0, scale: 0.95, y: 20 }}
+                        animate={{ opacity: 1, scale: 1, y: 0 }}
+                        className="bg-[#111] border border-white/10 rounded-2xl w-full max-w-lg relative z-10 overflow-hidden shadow-2xl"
+                    >
+                        <div className="p-6 border-b border-white/10 flex justify-between items-center">
+                            <div>
+                                <h3 className="text-lg font-bold font-[var(--font-orbitron)] text-pagani-gold">Version History</h3>
+                                <p className="text-[10px] text-gray-500 uppercase tracking-widest mt-1">Select a version to restore</p>
+                            </div>
+                            <button onClick={() => setViewingDocId(null)} className="text-gray-500 hover:text-white transition-colors">
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
+                            </button>
+                        </div>
+                        <div className="p-4 max-h-[400px] overflow-y-auto hidden-scrollbar space-y-3">
+                            {selectedDocVersions.map((v) => (
+                                <div key={v.id} className="bg-white/5 border border-white/5 rounded-xl p-4 flex items-center justify-between group hover:border-pagani-gold/30 transition-colors">
+                                    <div className="flex items-center gap-4">
+                                        <div className="w-8 h-8 rounded-full bg-pagani-gold/10 flex items-center justify-center text-pagani-gold text-[10px] font-bold">
+                                            V{v.version_number}
+                                        </div>
+                                        <div>
+                                            <div className="text-xs font-bold text-white">Uploaded by {v.created_by}</div>
+                                            <div className="text-[10px] text-gray-500">{new Date(v.created_at).toLocaleString()} • Hash: {v.hash}</div>
+                                        </div>
+                                    </div>
+                                    <button 
+                                        onClick={() => handleRestore(viewingDocId, v.version_number)}
+                                        className="bg-white/5 hover:bg-pagani-gold hover:text-black border border-white/10 group-hover:border-pagani-gold transition-all px-3 py-1.5 rounded text-[10px] font-bold uppercase tracking-wider"
+                                    >
+                                        Restore
+                                    </button>
+                                </div>
+                            ))}
+                        </div>
+                        <div className="p-4 bg-black/40 text-center border-t border-white/5">
+                            <p className="text-[10px] text-gray-600 uppercase tracking-widest">Restoring will update the active document in the RAG pipeline</p>
+                        </div>
+                    </motion.div>
+                </div>
+            )}
+
+            {/* Document Preview Modal */}
+            {isPreviewOpen && (
+                <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+                    <motion.div 
+                        initial={{ opacity: 0 }} animate={{ opacity: 1 }}
+                        className="absolute inset-0 bg-black/90 backdrop-blur-md"
+                        onClick={() => { setIsPreviewOpen(false); setPreviewContent(null); }}
+                    />
+                    <motion.div 
+                        initial={{ opacity: 0, scale: 0.95, y: 20 }}
+                        animate={{ opacity: 1, scale: 1, y: 0 }}
+                        className="bg-[#111] border border-white/10 rounded-2xl w-full max-w-4xl max-h-[85vh] relative z-10 overflow-hidden shadow-2xl flex flex-col"
+                    >
+                        <div className="p-6 border-b border-white/10 flex justify-between items-center bg-black/40">
+                            <div>
+                                <h3 className="text-lg font-bold font-[var(--font-orbitron)] text-pagani-gold">Document Preview</h3>
+                                <p className="text-[10px] text-gray-500 uppercase tracking-widest mt-1">
+                                    {isFetchingPreview ? "Loading content..." : `Viewing: ${previewContent?.filename || "..."}`}
+                                </p>
+                            </div>
+                            <button onClick={() => { setIsPreviewOpen(false); setPreviewContent(null); }} className="text-gray-500 hover:text-white transition-colors p-2 bg-white/5 rounded-full">
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
+                            </button>
+                        </div>
+                        <div className="flex-1 overflow-y-auto p-8 bg-[#0a0a0a]">
+                            {isFetchingPreview ? (
+                                <div className="h-64 flex flex-col items-center justify-center gap-4">
+                                    <motion.div 
+                                        animate={{ rotate: 360 }} 
+                                        transition={{ repeat: Infinity, duration: 1, ease: "linear" }}
+                                        className="w-10 h-10 border-2 border-pagani-gold/30 border-t-pagani-gold rounded-full"
+                                    />
+                                    <span className="text-[10px] uppercase tracking-[0.2em] text-gray-500">Extracting Knowledge...</span>
+                                </div>
+                            ) : (
+                                <div className="max-w-3xl mx-auto">
+                                    <pre className="text-sm text-gray-300 whitespace-pre-wrap font-sans leading-relaxed">
+                                        {previewContent?.content || "No content available for this document."}
+                                    </pre>
+                                </div>
+                            )}
+                        </div>
+                        <div className="p-4 bg-pagani-gold/5 border-t border-pagani-gold/10 text-center">
+                            <p className="text-[9px] text-pagani-gold/60 uppercase tracking-widest font-bold">
+                                This content is currently active in the RAG vector store for retrieval
+                            </p>
+                        </div>
+                    </motion.div>
+                </div>
+            )}
         </div>
     );
 }

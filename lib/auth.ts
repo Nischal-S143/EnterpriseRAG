@@ -57,7 +57,12 @@ export async function register(
     });
 }
 
-export function logout(): void {
+export async function logout(): Promise<void> {
+    try {
+        await apiFetch("/api/logout", { method: "POST" });
+    } catch {
+        // Ignore error if already logged out or token expired
+    }
     localStorage.removeItem("pagani_access_token");
     localStorage.removeItem("pagani_refresh_token");
     localStorage.removeItem("pagani_user");

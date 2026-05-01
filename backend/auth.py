@@ -21,6 +21,8 @@ load_dotenv()
 logger = logging.getLogger("pagani.auth")
 
 # ── DB Persistence Helpers (additive, non-breaking) ──
+
+
 async def _persist_user_to_db(username: str, password_hash: str, role: str):
     """Persist a registered user to the database (fire-and-forget)."""
     def _write():
@@ -42,6 +44,7 @@ def _log_auth_event(action: str, username: str, metadata: dict | None = None):
     """Log an auth event to the database (universally non-blocking)."""
     from logging_config import log_event
     log_event("pagani.auth", action, user_id=username, metadata=metadata)
+
 
 # ── Configuration ──
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "")
@@ -129,6 +132,7 @@ class UserRegister(BaseModel):
     def sanitize_username(cls, v: str) -> str:
         return bleach.clean(v, tags=[], strip=True)
 
+
 class UserLogin(BaseModel):
     username: str
     password: str
@@ -138,6 +142,7 @@ class UserLogin(BaseModel):
     def sanitize_username(cls, v: str) -> str:
         return bleach.clean(v, tags=[], strip=True)
 
+
 class TokenResponse(BaseModel):
     access_token: str
     refresh_token: str
@@ -146,13 +151,16 @@ class TokenResponse(BaseModel):
     role: str
     username: str
 
+
 class RefreshRequest(BaseModel):
     refresh_token: str
+
 
 class ChatRequest(BaseModel):
     question: str = Field(..., min_length=1, max_length=2000)
     format: Optional[str] = Field(default="Standard")
-    metadata_filters: Optional[list[str]] = Field(default=None, description="Topic filter names from the Topic Explorer")
+    metadata_filters: Optional[list[str]] = Field(
+        default=None, description="Topic filter names from the Topic Explorer")
 
     @field_validator("question")
     @classmethod
@@ -281,6 +289,7 @@ def verify_refresh_token(token: str) -> dict:
 
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "pagani-super-secret-admin")
 
+
 def verify_admin_key(x_admin_key: str = Header(...)):
     """Validates X-Admin-Key using a timing-attack safe compare."""
     if not secrets.compare_digest(x_admin_key, ADMIN_API_KEY):
@@ -289,6 +298,7 @@ def verify_admin_key(x_admin_key: str = Header(...)):
             detail="Invalid Admin Key",
         )
     return x_admin_key
+
 
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
@@ -475,16 +485,26 @@ def refresh_access_token(refresh_token: str) -> TokenResponse:
 # Gatekeeper & Review Queue
 # ═══════════════════════════════════════════
 
+
 # In-Memory Review Queue
 # Structure: { query_id: { username, question, reason, status, timestamp } }
 review_queue: dict[str, dict] = {}
+
 
 class Gatekeeper:
     """
     Acts as a security and quality filter for incoming RAG queries.
     """
+
     def __init__(self, flag_keywords: list[str] = None, confidence_threshold: float = 0.50):
-        self.flag_keywords = flag_keywords or ["confidential", "salary", "ssn", "password", "exploit", "hack", "internal only"]
+        self.flag_keywords = flag_keywords or [
+            "confidential",
+            "salary",
+            "ssn",
+            "password",
+            "exploit",
+            "hack",
+            "internal only"]
         self.confidence_threshold = confidence_threshold
 
     def check_query(self, question: str, username: str, confidence: float = None) -> dict:
@@ -494,18 +514,18 @@ class Gatekeeper:
         """
         import uuid
         from datetime import datetime, timezone
-        
+
         reason = None
-        
+
         # 1. Keyword check
         q_lower = question.lower()
         if any(kw in q_lower for kw in self.flag_keywords):
             reason = "Contains restricted keywords"
-            
+
         # 2. Confidence check
         elif confidence is not None and confidence < self.confidence_threshold:
             reason = "Retrieval/Analytics confidence below threshold"
-            
+
         if reason:
             query_id = str(uuid.uuid4())
             review_queue[query_id] = {
@@ -515,7 +535,7 @@ class Gatekeeper:
                 "status": "pending_review",
                 "timestamp": datetime.now(timezone.utc).isoformat()
             }
-            
+
             # Save to database
             try:
                 from database import get_db_session
@@ -534,5 +554,5 @@ class Gatekeeper:
 
             logger.warning(f"Gatekeeper flagged query from {username}. Reason: {reason}")
             return {"status": "under_review"}
-            
+
         return {"status": "ok"}
